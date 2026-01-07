@@ -1,4 +1,4 @@
-var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configurable:!0,writable:!0,value:e}):p[c]=e;var r=(p,c,e)=>(A(p,typeof c!="symbol"?c+"":c,e),e);function C(p){return`opencode_history_${p}`}function j(p){let c=new Date(p);if(isNaN(c.getTime()))return{display:"Unknown",tooltip:"Invalid timestamp"};let e=new Date,t=e.getTime()-c.getTime(),i=Math.floor(t/6e4),s=Math.floor(t/36e5),o=c.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),n=c.toLocaleDateString([],{month:"short",day:"numeric"}),a=c.toLocaleString(),d=c.toDateString()===e.toDateString();if(s>=2)return d?{display:o,tooltip:a}:{display:`${n} ${o}`,tooltip:a};if(i<1)return{display:"Just now",tooltip:a};if(i<60)return{display:`${i}m ago`,tooltip:a};{let h=Math.floor(i/60),l=i%60;return l===0?{display:`${h}h ago`,tooltip:a}:{display:`${h}h ${l}m ago`,tooltip:a}}}var D={idle:{icon:"mdi:sleep",color:"#4caf50",label:"Idle"},working:{icon:"mdi:cog",color:"#2196f3",label:"Working"},waiting_permission:{icon:"mdi:shield-alert",color:"#ff9800",label:"Needs Permission"},error:{icon:"mdi:alert-circle",color:"#f44336",label:"Error"},unknown:{icon:"mdi:help-circle",color:"#9e9e9e",label:"Unknown"}},b=class b extends HTMLElement{constructor(){super(...arguments);r(this,"_hass");r(this,"_config");r(this,"_devices",new Map);r(this,"_deviceRegistry",new Map);r(this,"_entityRegistry",new Map);r(this,"_initialized",!1);r(this,"_showPermissionModal",!1);r(this,"_activePermission",null);r(this,"_selectedDeviceId",null);r(this,"_showHistoryView",!1);r(this,"_historyLoading",!1);r(this,"_historyData",null);r(this,"_historyDeviceId",null);r(this,"_historyCommandTopic",null);r(this,"_historyResponseTopic",null);r(this,"_mqttUnsubscribe",null);r(this,"_historyVisibleCount",10);r(this,"_historyLoadingMore",!1);r(this,"_isAtBottom",!0);r(this,"_pendingPermissions",new Map);r(this,"_lastRenderHash","");r(this,"_availableAgents",[]);r(this,"_selectedAgent",null);r(this,"_agentsLoading",!1);r(this,"_autoRefreshInterval",null);r(this,"_lastDeviceState",null)}set hass(e){if(this._hass=e,!this._initialized)this._initialize();else{if(this._updateDevices(),this._showHistoryView&&this._historyDeviceId){let o=this._devices.get(this._historyDeviceId)?.entities.get("state")?.state??"unknown";this._lastDeviceState!==null&&this._lastDeviceState!==o&&this._refreshHistory(),this._lastDeviceState=o,this._manageAutoRefresh(o);return}if(this._showPermissionModal&&this._activePermission){let i=this._findDeviceIdForPermission(this._activePermission);if(i){let s=this._pendingPermissions.get(i);if(s&&s.permission_id&&!this._activePermission.permission_id){this._activePermission=s,this._render();return}}return}let t=this._computeStateHash();t!==this._lastRenderHash&&(this._lastRenderHash=t,this._render())}}_manageAutoRefresh(e){let t=(this._config?.working_refresh_interval??10)*1e3;e==="working"?this._autoRefreshInterval||(this._autoRefreshInterval=setInterval(()=>{this._showHistoryView&&!this._historyLoading&&this._refreshHistory()},t)):this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null)}_computeStateHash(){let e=[];for(let[t,i]of this._devices){let s=i.entities.get("state"),o=i.entities.get("session_title"),n=i.entities.get("model"),a=i.entities.get("current_tool"),d=i.entities.get("cost"),h=i.entities.get("tokens_input"),l=i.entities.get("tokens_output"),m=i.entities.get("permission"),v=i.entities.get("last_activity"),g=s?.attributes?.agent,u=s?.attributes?.current_agent;e.push(`${t}:${s?.state}:${o?.state}:${n?.state}:${a?.state}:${d?.state}:${h?.state}:${l?.state}:${m?.state}:${v?.state}:${g}:${u}`),m?.state==="pending"&&e.push(`perm:${m.attributes?.permission_id}`)}for(let[t,i]of this._pendingPermissions)e.push(`pending:${t}:${i.permission_id}`);return e.join("|")}_findDeviceIdForPermission(e){for(let[t,i]of this._devices)if(i.entities.get("device_id")?.attributes?.command_topic===e.commandTopic)return t;return null}setConfig(e){this._config=e}async _initialize(){this._hass&&(this._initialized=!0,await this._fetchRegistries(),this._updateDevices(),this._render())}async _fetchRegistries(){if(this._hass)try{let e=await this._hass.callWS({type:"config/device_registry/list"});for(let i of e)i.manufacturer==="OpenCode"&&this._deviceRegistry.set(i.id,i);let t=await this._hass.callWS({type:"config/entity_registry/list"});for(let i of t)i.platform==="mqtt"&&this._deviceRegistry.has(i.device_id)&&this._entityRegistry.set(i.entity_id,i)}catch(e){console.error("[opencode-card] Failed to fetch registries:",e)}}_updateDevices(){if(this._hass){this._devices.clear();for(let[e,t]of this._entityRegistry){let i=this._deviceRegistry.get(t.device_id);if(!i)continue;let s=this._hass.states[e];if(!s)continue;let o=this._devices.get(i.id);o||(o={deviceId:i.id,deviceName:i.name,entities:new Map},this._devices.set(i.id,o));let n=t.unique_id||"",a="",d=i.identifiers?.[0]?.[1]||"";if(d&&n.startsWith(d+"_"))a=n.slice(d.length+1);else{let h=["device_id","state","session_title","model","current_tool","tokens_input","tokens_output","cost","last_activity","permission"];for(let l of h)if(n.endsWith("_"+l)){a=l;break}}a&&o.entities.set(a,s)}this._updatePendingPermissions()}}_updatePendingPermissions(){for(let[e,t]of this._devices){let i=t.entities.get("permission"),s=t.entities.get("state"),o=t.entities.get("device_id");if(i?.state==="pending"&&i.attributes){let n=i.attributes;n.permission_id&&n.title&&this._pendingPermissions.set(e,{permission_id:n.permission_id,type:n.type||"unknown",title:n.title,session_id:n.session_id||"",message_id:n.message_id||"",call_id:n.call_id,pattern:n.pattern,metadata:n.metadata,commandTopic:o?.attributes?.command_topic??""})}else if(s?.state!=="waiting_permission"||i?.state==="none")this._pendingPermissions.delete(e);else if(s?.state==="waiting_permission"&&!this._pendingPermissions.has(e)){let n=o?.attributes?.command_topic??"";n&&this._pendingPermissions.set(e,{permission_id:"",type:"pending",title:"Permission Required",session_id:"",message_id:"",commandTopic:n})}}}_getPinnedDevice(){return this._config?.device&&this._devices.get(this._config.device)||null}_getPermissionDetails(e){let t=this._pendingPermissions.get(e.deviceId);if(t&&t.permission_id)return t;let i=e.entities.get("permission"),s=e.entities.get("device_id");if(i?.state!=="pending"||!i.attributes)return t||null;let o=i.attributes;return{permission_id:o.permission_id,type:o.type,title:o.title,session_id:o.session_id,message_id:o.message_id,call_id:o.call_id,pattern:o.pattern,metadata:o.metadata,commandTopic:s?.attributes?.command_topic??""}}_showPermission(e){this._activePermission=e,this._showPermissionModal=!0,this._render()}_hidePermissionModal(){this._showPermissionModal=!1,this._activePermission=null,this._render()}_selectDevice(e){this._selectedDeviceId=e,this._render()}_goBack(){this._selectedDeviceId=null,this._render()}_isPinned(){return!!this._config?.device}async _sendChatMessage(e){if(!(!this._hass||!this._historyCommandTopic||!e.trim()))try{if(this._historyData){let i={id:`temp_${Date.now()}`,role:"user",timestamp:new Date().toISOString(),parts:[{type:"text",content:e.trim()}]};this._historyData.messages.push(i),this._render(),setTimeout(()=>{let s=this.querySelector(".history-body");s&&(s.scrollTop=s.scrollHeight)},0)}let t={command:"prompt",text:e.trim()};this._selectedAgent&&(t.agent=this._selectedAgent),await this._hass.callService("mqtt","publish",{topic:this._historyCommandTopic,payload:JSON.stringify(t)})}catch(t){console.error("[opencode-card] Failed to send chat message:",t)}}async _showHistory(e,t,i){this._historyDeviceId=e,this._historyCommandTopic=t,this._historyResponseTopic=i,this._showHistoryView=!0,this._historyLoading=!0,this._selectedAgent=null;let o=this._devices.get(e)?.entities.get("state");this._lastDeviceState=o?.state??"unknown",this._manageAutoRefresh(this._lastDeviceState),this._render(),this._fetchAgents();let n=this._loadHistoryFromCache(e);n?(this._historyData=n.data,this._historyLoading=!1,this._render(),await this._fetchHistorySince(n.lastFetched)):await this._fetchFullHistory()}async _fetchAgents(){if(!this._hass||!this._historyCommandTopic||!this._historyResponseTopic)return;this._agentsLoading=!0;let e=`agents_${Date.now()}`;try{let t=await this._hass.connection.subscribeMessage(i=>{let o=i.variables?.trigger;if(o?.topic===this._historyResponseTopic)try{let n=o.payload_json||JSON.parse(o.payload||"{}");n.type==="agents"&&(!n.request_id||n.request_id===e)&&(this._availableAgents=n.agents,this._agentsLoading=!1,this._render(),t())}catch(n){console.error("[opencode-card] Failed to parse agents response:",n)}},{type:"subscribe_trigger",trigger:{platform:"mqtt",topic:this._historyResponseTopic}});await this._hass.callService("mqtt","publish",{topic:this._historyCommandTopic,payload:JSON.stringify({command:"get_agents",request_id:e})}),setTimeout(()=>{this._agentsLoading&&(this._agentsLoading=!1,t())},1e4)}catch(t){console.error("[opencode-card] Failed to fetch agents:",t),this._agentsLoading=!1}}_hideHistoryView(){this._showHistoryView=!1,this._historyLoading=!1,this._historyData=null,this._historyDeviceId=null,this._historyCommandTopic=null,this._historyResponseTopic=null,this._historyVisibleCount=10,this._isAtBottom=!0,this._availableAgents=[],this._selectedAgent=null,this._agentsLoading=!1,this._lastDeviceState=null,this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null),this._render()}_scrollToBottom(){let e=this.querySelector(".history-body");if(e){e.scrollTop=e.scrollHeight,this._isAtBottom=!0;let t=this.querySelector(".scroll-to-bottom-btn");t&&t.classList.add("hidden")}}_loadHistoryFromCache(e){try{let t=localStorage.getItem(C(e));if(t)return JSON.parse(t)}catch(t){console.error("[opencode-card] Failed to load history from cache:",t)}return null}_saveHistoryToCache(e,t){try{let i={data:t,lastFetched:t.fetched_at};localStorage.setItem(C(e),JSON.stringify(i))}catch(i){console.error("[opencode-card] Failed to save history to cache:",i)}}async _fetchFullHistory(){if(!this._hass||!this._historyCommandTopic||!this._historyResponseTopic||!this._historyDeviceId)return;let e=`req_${Date.now()}`;await this._subscribeToResponse(e);try{await this._hass.callService("mqtt","publish",{topic:this._historyCommandTopic,payload:JSON.stringify({command:"get_history",request_id:e})})}catch(t){console.error("[opencode-card] Failed to request history:",t),this._historyLoading=!1,this._render()}}async _fetchHistorySince(e){if(!this._hass||!this._historyCommandTopic||!this._historyResponseTopic||!this._historyDeviceId)return;let t=`req_${Date.now()}`;await this._subscribeToResponse(t);try{await this._hass.callService("mqtt","publish",{topic:this._historyCommandTopic,payload:JSON.stringify({command:"get_history_since",since:e,request_id:t})})}catch(i){console.error("[opencode-card] Failed to request history update:",i)}}async _subscribeToResponse(e){if(!(!this._hass||!this._historyResponseTopic))try{let t=await this._hass.connection.subscribeMessage(i=>{let o=i.variables?.trigger;if(o?.topic===this._historyResponseTopic)try{let n=o.payload_json||JSON.parse(o.payload||"{}");n.type==="history"&&(!n.request_id||n.request_id===e)&&this._handleHistoryResponse(n)}catch(n){console.error("[opencode-card] Failed to parse history response:",n)}},{type:"subscribe_trigger",trigger:{platform:"mqtt",topic:this._historyResponseTopic}});this._mqttUnsubscribe=t,setTimeout(()=>{this._mqttUnsubscribe&&(this._mqttUnsubscribe(),this._mqttUnsubscribe=null),this._historyLoading&&(this._historyLoading=!1,this._render())},3e4)}catch(t){console.error("[opencode-card] Failed to subscribe to response topic:",t)}}_handleHistoryResponse(e){if(!this._historyDeviceId)return;let t=e.since&&e.messages.length>0,i=!this._historyData;if(e.since&&this._historyData){let s=new Set(this._historyData.messages.map(n=>n.id)),o=e.messages.filter(n=>!s.has(n.id));this._historyData.messages.push(...o),this._historyData.fetched_at=e.fetched_at}else this._historyData=e;this._saveHistoryToCache(this._historyDeviceId,this._historyData),this._historyLoading=!1,this._render(),(i||t&&this._isAtBottom)&&setTimeout(()=>this._scrollToBottom(),0),this._mqttUnsubscribe&&(this._mqttUnsubscribe(),this._mqttUnsubscribe=null)}_refreshHistory(){!this._historyDeviceId||!this._historyData||(this._historyLoading=!0,this._render(),this._fetchHistorySince(this._historyData.fetched_at))}async _respondToPermission(e){if(!this._hass||!this._activePermission)return;let{commandTopic:t,permission_id:i}=this._activePermission;if(!t){console.error("[opencode-card] Cannot respond: missing command topic");return}if(!i){console.error("[opencode-card] Cannot respond: missing permission_id (still loading)");return}try{await this._hass.callService("mqtt","publish",{topic:t,payload:JSON.stringify({command:"permission_response",permission_id:i,response:e})}),this._hidePermissionModal()}catch(s){console.error("[opencode-card] Failed to send permission response:",s)}}_render(){let e=this._config?.title??"OpenCode Sessions",t=this._getPinnedDevice(),i=this._selectedDeviceId?this._devices.get(this._selectedDeviceId):null,s="";t?s=`
+var A=Object.defineProperty;var j=(p,c,e)=>c in p?A(p,c,{enumerable:!0,configurable:!0,writable:!0,value:e}):p[c]=e;var r=(p,c,e)=>(j(p,typeof c!="symbol"?c+"":c,e),e);function C(p){return`opencode_history_${p}`}function q(p){let c=new Date(p);if(isNaN(c.getTime()))return{display:"Unknown",tooltip:"Invalid timestamp"};let e=new Date,t=e.getTime()-c.getTime(),i=Math.floor(t/6e4),s=Math.floor(t/36e5),o=c.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),n=c.toLocaleDateString([],{month:"short",day:"numeric"}),a=c.toLocaleString(),d=c.toDateString()===e.toDateString();if(s>=2)return d?{display:o,tooltip:a}:{display:`${n} ${o}`,tooltip:a};if(i<1)return{display:"Just now",tooltip:a};if(i<60)return{display:`${i}m ago`,tooltip:a};{let h=Math.floor(i/60),l=i%60;return l===0?{display:`${h}h ago`,tooltip:a}:{display:`${h}h ${l}m ago`,tooltip:a}}}var S={idle:{icon:"mdi:sleep",color:"#4caf50",label:"Idle"},working:{icon:"mdi:cog",color:"#2196f3",label:"Working"},waiting_permission:{icon:"mdi:shield-alert",color:"#ff9800",label:"Needs Permission"},error:{icon:"mdi:alert-circle",color:"#f44336",label:"Error"},unknown:{icon:"mdi:help-circle",color:"#9e9e9e",label:"Unknown"}},x=class x extends HTMLElement{constructor(){super(...arguments);r(this,"_hass");r(this,"_config");r(this,"_devices",new Map);r(this,"_deviceRegistry",new Map);r(this,"_entityRegistry",new Map);r(this,"_initialized",!1);r(this,"_showPermissionModal",!1);r(this,"_activePermission",null);r(this,"_selectedDeviceId",null);r(this,"_showHistoryView",!1);r(this,"_historyLoading",!1);r(this,"_historyData",null);r(this,"_historyDeviceId",null);r(this,"_historyCommandTopic",null);r(this,"_historyResponseTopic",null);r(this,"_mqttUnsubscribe",null);r(this,"_historyVisibleCount",10);r(this,"_historyLoadingMore",!1);r(this,"_isAtBottom",!0);r(this,"_pendingPermissions",new Map);r(this,"_lastRenderHash","");r(this,"_availableAgents",[]);r(this,"_selectedAgent",null);r(this,"_agentsLoading",!1);r(this,"_autoRefreshInterval",null);r(this,"_lastDeviceState",null)}set hass(e){if(this._hass=e,!this._initialized)this._initialize();else{if(this._updateDevices(),this._showHistoryView&&this._historyDeviceId){let o=this._devices.get(this._historyDeviceId)?.entities.get("state")?.state??"unknown";this._lastDeviceState!==null&&this._lastDeviceState!==o&&this._refreshHistory(),this._lastDeviceState=o,this._manageAutoRefresh(o);return}if(this._showPermissionModal&&this._activePermission){let i=this._findDeviceIdForPermission(this._activePermission);if(i){let s=this._pendingPermissions.get(i);if(s&&s.permission_id&&!this._activePermission.permission_id){this._activePermission=s,this._render();return}}return}let t=this._computeStateHash();t!==this._lastRenderHash&&(this._lastRenderHash=t,this._render())}}_manageAutoRefresh(e){let t=(this._config?.working_refresh_interval??10)*1e3;e==="working"?this._autoRefreshInterval||(this._autoRefreshInterval=setInterval(()=>{this._showHistoryView&&!this._historyLoading&&this._refreshHistory()},t)):this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null)}_computeStateHash(){let e=[];for(let[t,i]of this._devices){let s=i.entities.get("state"),o=i.entities.get("session_title"),n=i.entities.get("model"),a=i.entities.get("current_tool"),d=i.entities.get("cost"),h=i.entities.get("tokens_input"),l=i.entities.get("tokens_output"),v=i.entities.get("permission"),m=i.entities.get("last_activity"),g=s?.attributes?.agent,f=s?.attributes?.current_agent;e.push(`${t}:${s?.state}:${o?.state}:${n?.state}:${a?.state}:${d?.state}:${h?.state}:${l?.state}:${v?.state}:${m?.state}:${g}:${f}`),v?.state==="pending"&&e.push(`perm:${v.attributes?.permission_id}`)}for(let[t,i]of this._pendingPermissions)e.push(`pending:${t}:${i.permission_id}`);return e.join("|")}_findDeviceIdForPermission(e){for(let[t,i]of this._devices)if(i.entities.get("device_id")?.attributes?.command_topic===e.commandTopic)return t;return null}setConfig(e){this._config=e}async _initialize(){this._hass&&(this._initialized=!0,await this._fetchRegistries(),this._updateDevices(),this._render())}async _fetchRegistries(){if(this._hass)try{let e=await this._hass.callWS({type:"config/device_registry/list"});for(let i of e)i.manufacturer==="OpenCode"&&this._deviceRegistry.set(i.id,i);let t=await this._hass.callWS({type:"config/entity_registry/list"});for(let i of t)i.platform==="mqtt"&&this._deviceRegistry.has(i.device_id)&&this._entityRegistry.set(i.entity_id,i)}catch(e){console.error("[opencode-card] Failed to fetch registries:",e)}}_updateDevices(){if(this._hass){this._devices.clear();for(let[e,t]of this._entityRegistry){let i=this._deviceRegistry.get(t.device_id);if(!i)continue;let s=this._hass.states[e];if(!s)continue;let o=this._devices.get(i.id);o||(o={deviceId:i.id,deviceName:i.name,entities:new Map},this._devices.set(i.id,o));let n=t.unique_id||"",a="",d=i.identifiers?.[0]?.[1]||"";if(d&&n.startsWith(d+"_"))a=n.slice(d.length+1);else{let h=["device_id","state","session_title","model","current_tool","tokens_input","tokens_output","cost","last_activity","permission"];for(let l of h)if(n.endsWith("_"+l)){a=l;break}}a&&o.entities.set(a,s)}this._updatePendingPermissions()}}_updatePendingPermissions(){for(let[e,t]of this._devices){let i=t.entities.get("permission"),s=t.entities.get("state"),o=t.entities.get("device_id");if(i?.state==="pending"&&i.attributes){let n=i.attributes;n.permission_id&&n.title&&this._pendingPermissions.set(e,{permission_id:n.permission_id,type:n.type||"unknown",title:n.title,session_id:n.session_id||"",message_id:n.message_id||"",call_id:n.call_id,pattern:n.pattern,metadata:n.metadata,commandTopic:o?.attributes?.command_topic??""})}else if(s?.state!=="waiting_permission"||i?.state==="none")this._pendingPermissions.delete(e);else if(s?.state==="waiting_permission"&&!this._pendingPermissions.has(e)){let n=o?.attributes?.command_topic??"";n&&this._pendingPermissions.set(e,{permission_id:"",type:"pending",title:"Permission Required",session_id:"",message_id:"",commandTopic:n})}}}_getPinnedDevice(){return this._config?.device&&this._devices.get(this._config.device)||null}_getPermissionDetails(e){let t=this._pendingPermissions.get(e.deviceId);if(t&&t.permission_id)return t;let i=e.entities.get("permission"),s=e.entities.get("device_id");if(i?.state!=="pending"||!i.attributes)return t||null;let o=i.attributes;return{permission_id:o.permission_id,type:o.type,title:o.title,session_id:o.session_id,message_id:o.message_id,call_id:o.call_id,pattern:o.pattern,metadata:o.metadata,commandTopic:s?.attributes?.command_topic??""}}_showPermission(e){this._activePermission=e,this._showPermissionModal=!0,this._render()}_hidePermissionModal(){this._showPermissionModal=!1,this._activePermission=null,this._render()}_selectDevice(e){this._selectedDeviceId=e,this._render()}_goBack(){this._selectedDeviceId=null,this._render()}_isPinned(){return!!this._config?.device}async _sendChatMessage(e){if(!(!this._hass||!this._historyCommandTopic||!e.trim()))try{if(this._historyData){let i={id:`temp_${Date.now()}`,role:"user",timestamp:new Date().toISOString(),parts:[{type:"text",content:e.trim()}]};this._historyData.messages.push(i),this._render(),setTimeout(()=>{let s=this.querySelector(".history-body");s&&(s.scrollTop=s.scrollHeight)},0)}let t={command:"prompt",text:e.trim()};this._selectedAgent&&(t.agent=this._selectedAgent),await this._hass.callService("mqtt","publish",{topic:this._historyCommandTopic,payload:JSON.stringify(t)})}catch(t){console.error("[opencode-card] Failed to send chat message:",t)}}async _showHistory(e,t,i){this._historyDeviceId=e,this._historyCommandTopic=t,this._historyResponseTopic=i,this._showHistoryView=!0,this._historyLoading=!0,this._selectedAgent=null;let o=this._devices.get(e)?.entities.get("state");this._lastDeviceState=o?.state??"unknown",this._manageAutoRefresh(this._lastDeviceState),this._render(),this._fetchAgents();let n=this._loadHistoryFromCache(e);n?(this._historyData=n.data,this._historyLoading=!1,this._render(),await this._fetchHistorySince(n.lastFetched)):await this._fetchFullHistory()}async _fetchAgents(){if(!this._hass||!this._historyCommandTopic||!this._historyResponseTopic)return;this._agentsLoading=!0;let e=`agents_${Date.now()}`;try{let t=await this._hass.connection.subscribeMessage(i=>{let o=i.variables?.trigger;if(o?.topic===this._historyResponseTopic)try{let n=o.payload_json||JSON.parse(o.payload||"{}");n.type==="agents"&&(!n.request_id||n.request_id===e)&&(this._availableAgents=n.agents,this._agentsLoading=!1,this._render(),t())}catch(n){console.error("[opencode-card] Failed to parse agents response:",n)}},{type:"subscribe_trigger",trigger:{platform:"mqtt",topic:this._historyResponseTopic}});await this._hass.callService("mqtt","publish",{topic:this._historyCommandTopic,payload:JSON.stringify({command:"get_agents",request_id:e})}),setTimeout(()=>{this._agentsLoading&&(this._agentsLoading=!1,t())},1e4)}catch(t){console.error("[opencode-card] Failed to fetch agents:",t),this._agentsLoading=!1}}_hideHistoryView(){this._showHistoryView=!1,this._historyLoading=!1,this._historyData=null,this._historyDeviceId=null,this._historyCommandTopic=null,this._historyResponseTopic=null,this._historyVisibleCount=10,this._isAtBottom=!0,this._availableAgents=[],this._selectedAgent=null,this._agentsLoading=!1,this._lastDeviceState=null,this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null),this._render()}_scrollToBottom(){let e=this.querySelector(".history-body");if(e){e.scrollTop=e.scrollHeight,this._isAtBottom=!0;let t=this.querySelector(".scroll-to-bottom-btn");t&&t.classList.add("hidden")}}_loadHistoryFromCache(e){try{let t=localStorage.getItem(C(e));if(t)return JSON.parse(t)}catch(t){console.error("[opencode-card] Failed to load history from cache:",t)}return null}_saveHistoryToCache(e,t){try{let i={data:t,lastFetched:t.fetched_at};localStorage.setItem(C(e),JSON.stringify(i))}catch(i){console.error("[opencode-card] Failed to save history to cache:",i)}}async _fetchFullHistory(){if(!this._hass||!this._historyCommandTopic||!this._historyResponseTopic||!this._historyDeviceId)return;let e=`req_${Date.now()}`;await this._subscribeToResponse(e);try{await this._hass.callService("mqtt","publish",{topic:this._historyCommandTopic,payload:JSON.stringify({command:"get_history",request_id:e})})}catch(t){console.error("[opencode-card] Failed to request history:",t),this._historyLoading=!1,this._render()}}async _fetchHistorySince(e){if(!this._hass||!this._historyCommandTopic||!this._historyResponseTopic||!this._historyDeviceId)return;let t=`req_${Date.now()}`;await this._subscribeToResponse(t);try{await this._hass.callService("mqtt","publish",{topic:this._historyCommandTopic,payload:JSON.stringify({command:"get_history_since",since:e,request_id:t})})}catch(i){console.error("[opencode-card] Failed to request history update:",i)}}async _subscribeToResponse(e){if(!(!this._hass||!this._historyResponseTopic))try{let t=await this._hass.connection.subscribeMessage(i=>{let o=i.variables?.trigger;if(o?.topic===this._historyResponseTopic)try{let n=o.payload_json||JSON.parse(o.payload||"{}");n.type==="history"&&(!n.request_id||n.request_id===e)&&this._handleHistoryResponse(n)}catch(n){console.error("[opencode-card] Failed to parse history response:",n)}},{type:"subscribe_trigger",trigger:{platform:"mqtt",topic:this._historyResponseTopic}});this._mqttUnsubscribe=t,setTimeout(()=>{this._mqttUnsubscribe&&(this._mqttUnsubscribe(),this._mqttUnsubscribe=null),this._historyLoading&&(this._historyLoading=!1,this._render())},3e4)}catch(t){console.error("[opencode-card] Failed to subscribe to response topic:",t)}}_handleHistoryResponse(e){if(!this._historyDeviceId)return;let t=e.since&&e.messages.length>0,i=!this._historyData;if(e.since&&this._historyData){let s=new Set(this._historyData.messages.map(n=>n.id)),o=e.messages.filter(n=>!s.has(n.id));this._historyData.messages.push(...o),this._historyData.fetched_at=e.fetched_at}else this._historyData=e;this._saveHistoryToCache(this._historyDeviceId,this._historyData),this._historyLoading=!1,this._render(),(i||t&&this._isAtBottom)&&setTimeout(()=>this._scrollToBottom(),0),this._mqttUnsubscribe&&(this._mqttUnsubscribe(),this._mqttUnsubscribe=null)}_refreshHistory(){!this._historyDeviceId||!this._historyData||(this._historyLoading=!0,this._render(),this._fetchHistorySince(this._historyData.fetched_at))}async _respondToPermission(e){if(!this._hass||!this._activePermission)return;let{commandTopic:t,permission_id:i}=this._activePermission;if(!t){console.error("[opencode-card] Cannot respond: missing command topic");return}if(!i){console.error("[opencode-card] Cannot respond: missing permission_id (still loading)");return}try{await this._hass.callService("mqtt","publish",{topic:t,payload:JSON.stringify({command:"permission_response",permission_id:i,response:e})}),this._hidePermissionModal()}catch(s){console.error("[opencode-card] Failed to send permission response:",s)}}_render(){let e=this._config?.title??"OpenCode Sessions",t=this._getPinnedDevice(),i=this._selectedDeviceId?this._devices.get(this._selectedDeviceId):null,s="";t?s=`
         <ha-card>
           <div class="card-content pinned">
             ${this._renderDetailView(t,!1)}
@@ -139,7 +139,7 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
       `;let e=this._historyData.messages.length,t=Math.max(0,e-this._historyVisibleCount),i=this._historyData.messages.slice(t),s=t>0,o="";if(s){let n=t;o+=`
         <div class="history-load-more" data-action="load-more">
           <ha-icon icon="${this._historyLoadingMore?"mdi:loading":"mdi:chevron-up"}" class="${this._historyLoadingMore?"spinning":""}"></ha-icon>
-          <span>${this._historyLoadingMore?"Loading...":`Load ${Math.min(n,b.HISTORY_PAGE_SIZE)} more (${n} remaining)`}</span>
+          <span>${this._historyLoadingMore?"Loading...":`Load ${Math.min(n,x.HISTORY_PAGE_SIZE)} more (${n} remaining)`}</span>
         </div>
       `}return o+=i.map(n=>this._renderHistoryMessage(n)).join(""),o+=this._renderInlinePermission(),o}_renderInlinePermission(){if(!this._historyDeviceId)return"";let e=this._devices.get(this._historyDeviceId);if(!e||(e.entities.get("state")?.state??"unknown")!=="waiting_permission")return"";let s=this._pendingPermissions.get(this._historyDeviceId),o=s?.permission_id;return`
       <div class="inline-permission">
@@ -190,7 +190,7 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
           </button>
         </div>
       </div>
-    `}_loadMoreHistory(){if(!this._historyData||this._historyLoadingMore)return;let e=this._historyData.messages.length;Math.max(0,e-this._historyVisibleCount)<=0||(this._historyLoadingMore=!0,this._render(),setTimeout(()=>{this._historyVisibleCount+=b.HISTORY_PAGE_SIZE,this._historyLoadingMore=!1;let s=this.querySelector(".history-body")?.scrollHeight||0;this._render();let o=this.querySelector(".history-body");if(o&&s>0){let a=o.scrollHeight-s;o.scrollTop=a}},100))}_renderHistoryMessage(e){let t=e.role==="user",i=j(e.timestamp),s=e.parts.map(n=>{if(n.type==="text"&&n.content)return`<div class="history-text">${this._escapeHtml(n.content)}</div>`;if(n.type==="tool_call"){let a=n.tool_output||n.tool_error;return`
+    `}_loadMoreHistory(){if(!this._historyData||this._historyLoadingMore)return;let e=this._historyData.messages.length;Math.max(0,e-this._historyVisibleCount)<=0||(this._historyLoadingMore=!0,this._render(),setTimeout(()=>{this._historyVisibleCount+=x.HISTORY_PAGE_SIZE,this._historyLoadingMore=!1;let s=this.querySelector(".history-body")?.scrollHeight||0;this._render();let o=this.querySelector(".history-body");if(o&&s>0){let a=o.scrollHeight-s;o.scrollTop=a}},100))}_renderHistoryMessage(e){let t=e.role==="user",i=q(e.timestamp),s=e.parts.map(n=>{if(n.type==="text"&&n.content)return`<div class="history-text">${this._escapeHtml(n.content)}</div>`;if(n.type==="tool_call"){let a=n.tool_output||n.tool_error;return`
           <div class="history-tool">
             <div class="tool-header">
               <ha-icon icon="mdi:tools"></ha-icon>
@@ -221,16 +221,16 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
         <ha-icon icon="mdi:code-braces-box"></ha-icon>
         <p>No OpenCode sessions found</p>
       </div>
-    `}_renderDevices(){let e=[];for(let[,t]of this._devices)e.push(this._renderDevice(t));return e.join("")}_renderDetailView(e,t){let i=e.entities.get("state"),s=e.entities.get("session_title"),o=e.entities.get("model"),n=e.entities.get("current_tool"),a=e.entities.get("device_id"),d=e.entities.get("cost"),h=e.entities.get("tokens_input"),l=e.entities.get("tokens_output"),m=e.entities.get("last_activity"),v=i?.state??"unknown",g=D[v]||D.unknown,u=s?.state??"Unknown Session",P=o?.state??"unknown",_=n?.state??"none",x=a?.attributes?.command_topic??"unknown",E=a?.attributes?.response_topic??"",w=d?.state??"0",y=h?.state??"0",f=l?.state??"0",k=m?.state??"",S=i?.attributes?.agent||null,H=i?.attributes?.current_agent||null,z=i?.attributes?.hostname||null,R="";k&&(R=new Date(k).toLocaleTimeString());let $=this._getPermissionDetails(e),T="";if($){let M=!!$.permission_id;T=`
+    `}_renderDevices(){let e=[];for(let[,t]of this._devices)e.push(this._renderDevice(t));return e.join("")}_renderDetailView(e,t){let i=e.entities.get("state"),s=e.entities.get("session_title"),o=e.entities.get("model"),n=e.entities.get("current_tool"),a=e.entities.get("device_id"),d=e.entities.get("cost"),h=e.entities.get("tokens_input"),l=e.entities.get("tokens_output"),v=e.entities.get("last_activity"),m=i?.state??"unknown",g=S[m]||S.unknown,f=s?.state??"Unknown Session",w=o?.state??"unknown",H=n?.state??"none",k=a?.attributes?.command_topic??"unknown",T=a?.attributes?.response_topic??"",I=d?.state??"0",$=h?.state??"0",b=l?.state??"0",_=v?.state??"",u=i?.attributes?.agent||null,y=i?.attributes?.current_agent||null,D=i?.attributes?.hostname||null,R="";_&&(R=new Date(_).toLocaleTimeString());let E=this._getPermissionDetails(e),L="";if(E){let M=!!E.permission_id;L=`
         <div class="permission-alert pinned clickable" data-device-id="${e.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
           <div class="permission-details">
-            <div class="permission-title">${$.title}</div>
-            <div class="permission-type">${$.type}${M?"":" (loading...)"}</div>
+            <div class="permission-title">${E.title}</div>
+            <div class="permission-type">${E.type}${M?"":" (loading...)"}</div>
           </div>
           <ha-icon icon="mdi:chevron-right" class="permission-chevron"></ha-icon>
         </div>
-      `}else v==="waiting_permission"&&(T=`
+      `}else m==="waiting_permission"&&(L=`
         <div class="permission-alert pinned clickable" data-device-id="${e.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
           <div class="permission-details">
@@ -248,41 +248,41 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
       </button>
     `:""}
         <div class="detail-header">
-          <div class="detail-status ${v==="working"?"pulse":""}" style="background: ${g.color}20; border-color: ${g.color}">
+          <div class="detail-status ${m==="working"?"pulse":""}" style="background: ${g.color}20; border-color: ${g.color}">
             <ha-icon icon="${g.icon}" style="color: ${g.color}"></ha-icon>
             <span class="status-text" style="color: ${g.color}">${g.label}</span>
           </div>
           <div class="detail-project-info">
             <div class="detail-project">${e.deviceName.replace("OpenCode - ","")}</div>
-            ${z?`<div class="detail-hostname"><ha-icon icon="mdi:server"></ha-icon> ${z}</div>`:""}
+            ${D?`<div class="detail-hostname"><ha-icon icon="mdi:server"></ha-icon> ${D}</div>`:""}
           </div>
         </div>
 
         <div class="detail-session">
           <ha-icon icon="mdi:message-text"></ha-icon>
-          <span class="session-title">${u}</span>
+          <span class="session-title">${f}</span>
         </div>
 
-        ${T}
+        ${L}
 
         <div class="detail-info">
           <div class="detail-row">
             <ha-icon icon="mdi:brain"></ha-icon>
             <span class="detail-label">Model</span>
-            <span class="detail-value mono">${P}</span>
+            <span class="detail-value mono">${w}</span>
           </div>
-          ${S?`
+          ${u?`
           <div class="detail-row">
             <ha-icon icon="mdi:account-cog"></ha-icon>
             <span class="detail-label">Agent</span>
-            <span class="detail-value agent-badge">${S}${H&&H!==S?` <span class="sub-agent-indicator"><ha-icon icon="mdi:arrow-right"></ha-icon> ${H}</span>`:""}</span>
+            <span class="detail-value agent-badge">${u}${y&&y!==u?` <span class="sub-agent-indicator"><ha-icon icon="mdi:arrow-right"></ha-icon> ${y}</span>`:""}</span>
           </div>
           `:""}
-          ${_!=="none"?`
+          ${H!=="none"?`
           <div class="detail-row highlight">
             <ha-icon icon="mdi:tools"></ha-icon>
             <span class="detail-label">Tool</span>
-            <span class="detail-value mono tool-active">${_}</span>
+            <span class="detail-value mono tool-active">${H}</span>
           </div>
           `:""}
           <div class="detail-row">
@@ -295,42 +295,42 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
         <div class="detail-stats">
           <div class="stat">
             <ha-icon icon="mdi:currency-usd"></ha-icon>
-            <span class="stat-value">$${parseFloat(w).toFixed(4)}</span>
+            <span class="stat-value">$${parseFloat(I).toFixed(4)}</span>
             <span class="stat-label">Cost</span>
           </div>
           <div class="stat">
             <ha-icon icon="mdi:arrow-right-bold"></ha-icon>
-            <span class="stat-value">${Number(y).toLocaleString()}</span>
+            <span class="stat-value">${Number($).toLocaleString()}</span>
             <span class="stat-label">In</span>
           </div>
           <div class="stat">
             <ha-icon icon="mdi:arrow-left-bold"></ha-icon>
-            <span class="stat-value">${Number(f).toLocaleString()}</span>
+            <span class="stat-value">${Number(b).toLocaleString()}</span>
             <span class="stat-label">Out</span>
           </div>
         </div>
 
         <div class="detail-actions">
-          <button class="open-chat-btn" data-device-id="${e.deviceId}" data-command-topic="${x}" data-response-topic="${E}">
+          <button class="open-chat-btn" data-device-id="${e.deviceId}" data-command-topic="${k}" data-response-topic="${T}">
             <ha-icon icon="mdi:chat"></ha-icon>
             <span>Chat</span>
           </button>
         </div>
 
         <div class="detail-footer">
-          <code class="command-topic">${x}</code>
+          <code class="command-topic">${k}</code>
         </div>
       </div>
-    `}_renderDevice(e){let t=e.entities.get("state"),i=e.entities.get("session_title"),s=e.entities.get("model"),o=e.entities.get("current_tool"),n=e.entities.get("device_id"),a=e.entities.get("cost"),d=e.entities.get("tokens_input"),h=e.entities.get("tokens_output"),l=t?.state??"unknown",m=D[l]||D.unknown,v=i?.state??"Unknown Session",g=s?.state??"unknown",u=o?.state??"none",P=n?.attributes?.command_topic??"unknown",_=a?.state??"0",x=d?.state??"0",E=h?.state??"0",w=t?.attributes?.current_agent||null,y=this._getPermissionDetails(e),f="";if(y){let k=!!y.permission_id;f=`
+    `}_renderDevice(e){let t=e.entities.get("state"),i=e.entities.get("session_title"),s=e.entities.get("model"),o=e.entities.get("current_tool"),n=e.entities.get("device_id"),a=e.entities.get("cost"),d=e.entities.get("tokens_input"),h=e.entities.get("tokens_output"),l=e.entities.get("last_activity"),v=t?.state??"unknown",m=S[v]||S.unknown,g=i?.state??"Unknown Session",f=s?.state??"unknown",w=o?.state??"none",H=n?.attributes?.command_topic??"unknown",k=a?.state??"0",T=d?.state??"0",I=h?.state??"0",$=l?.state??"",b=$?q($):null,_=t?.attributes?.current_agent||null,u=this._getPermissionDetails(e),y="";if(u){let D=!!u.permission_id;y=`
         <div class="permission-alert clickable" data-device-id="${e.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
           <div class="permission-details">
-            <div class="permission-title">${y.title}</div>
-            <div class="permission-type">${y.type}${k?"":" (loading...)"}</div>
+            <div class="permission-title">${u.title}</div>
+            <div class="permission-type">${u.type}${D?"":" (loading...)"}</div>
           </div>
           <ha-icon icon="mdi:chevron-right" class="permission-chevron"></ha-icon>
         </div>
-      `}else l==="waiting_permission"&&(f=`
+      `}else v==="waiting_permission"&&(y=`
         <div class="permission-alert clickable" data-device-id="${e.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
           <div class="permission-details">
@@ -342,11 +342,14 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
       `);return`
       <div class="device-card clickable" data-device-id="${e.deviceId}">
         <div class="device-header">
-          <div class="device-status ${l==="working"?"pulse":""}">
+          <div class="device-status ${v==="working"?"pulse":""}">
             <ha-icon icon="${m.icon}" style="color: ${m.color}"></ha-icon>
             <span class="status-label" style="color: ${m.color}">${m.label}</span>
           </div>
-          <div class="device-name">${e.deviceName.replace("OpenCode - ","")}</div>
+          <div class="device-name-container">
+            <div class="device-name">${e.deviceName.replace("OpenCode - ","")}</div>
+            ${b?`<div class="device-activity" title="${b.tooltip}">${b.display}</div>`:""}
+          </div>
           <ha-icon icon="mdi:chevron-right" class="device-chevron"></ha-icon>
         </div>
         
@@ -354,38 +357,38 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
           <div class="info-row">
             <ha-icon icon="mdi:message-text"></ha-icon>
             <span class="info-label">Session:</span>
-            <span class="info-value">${v}</span>
+            <span class="info-value">${g}</span>
           </div>
           <div class="info-row">
             <ha-icon icon="mdi:brain"></ha-icon>
             <span class="info-label">Model:</span>
-            <span class="info-value model">${g}</span>
+            <span class="info-value model">${f}</span>
           </div>
-          ${u!=="none"?`
+          ${w!=="none"?`
           <div class="info-row">
             <ha-icon icon="mdi:tools"></ha-icon>
             <span class="info-label">Tool:</span>
-            <span class="info-value tool">${u}</span>
+            <span class="info-value tool">${w}</span>
           </div>
           `:""}
-          ${w?`
+          ${_?`
           <div class="info-row">
             <ha-icon icon="mdi:account-switch"></ha-icon>
             <span class="info-label">Sub-agent:</span>
-            <span class="info-value sub-agent">${w}</span>
+            <span class="info-value sub-agent">${_}</span>
           </div>
           `:""}
           <div class="info-row stats">
             <ha-icon icon="mdi:currency-usd"></ha-icon>
-            <span class="stat-value">$${parseFloat(_).toFixed(4)}</span>
+            <span class="stat-value">$${parseFloat(k).toFixed(4)}</span>
             <ha-icon icon="mdi:arrow-right-bold"></ha-icon>
-            <span class="stat-value">${x}</span>
+            <span class="stat-value">${T}</span>
             <ha-icon icon="mdi:arrow-left-bold"></ha-icon>
-            <span class="stat-value">${E}</span>
+            <span class="stat-value">${I}</span>
           </div>
         </div>
 
-        ${f}
+        ${y}
       </div>
     `}_getStyles(){return`
       ha-card {
@@ -472,10 +475,23 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
         text-transform: uppercase;
         font-size: 0.85em;
       }
-      .device-name {
+      .device-name-container {
         flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .device-name {
         font-weight: 500;
         color: var(--primary-text-color);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .device-activity {
+        font-size: 0.75em;
+        color: var(--secondary-text-color);
+        margin-top: 2px;
       }
       .device-chevron {
         --mdc-icon-size: 20px;
@@ -1557,7 +1573,7 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
       .inline-perm-btn.allow-always:not(:disabled):hover {
         background: #388e3c;
       }
-    `}static getConfigElement(){return document.createElement("opencode-card-editor")}static getStubConfig(){return{title:"OpenCode Sessions"}}};r(b,"HISTORY_PAGE_SIZE",10);var I=b,L=class extends HTMLElement{constructor(){super(...arguments);r(this,"_config");r(this,"_hass");r(this,"_devices",[])}set hass(e){this._hass=e,this._fetchDevices()}setConfig(e){this._config=e,this._render()}async _fetchDevices(){if(this._hass)try{let e=await this._hass.callWS({type:"config/device_registry/list"});this._devices=e.filter(t=>t.manufacturer==="OpenCode"),this._render()}catch(e){console.error("[opencode-card-editor] Failed to fetch devices:",e)}}_render(){let e=this._config?.device??"",t=this._config?.title??"";this.innerHTML=`
+    `}static getConfigElement(){return document.createElement("opencode-card-editor")}static getStubConfig(){return{title:"OpenCode Sessions"}}};r(x,"HISTORY_PAGE_SIZE",10);var P=x,z=class extends HTMLElement{constructor(){super(...arguments);r(this,"_config");r(this,"_hass");r(this,"_devices",[])}set hass(e){this._hass=e,this._fetchDevices()}setConfig(e){this._config=e,this._render()}async _fetchDevices(){if(this._hass)try{let e=await this._hass.callWS({type:"config/device_registry/list"});this._devices=e.filter(t=>t.manufacturer==="OpenCode"),this._render()}catch(e){console.error("[opencode-card-editor] Failed to fetch devices:",e)}}_render(){let e=this._config?.device??"",t=this._config?.title??"";this.innerHTML=`
       <div class="editor">
         <div class="field">
           <label for="title">Title</label>
@@ -1613,4 +1629,4 @@ var q=Object.defineProperty;var A=(p,c,e)=>c in p?q(p,c,{enumerable:!0,configura
           margin-top: 4px;
         }
       </style>
-    `;let i=this.querySelector("#title"),s=this.querySelector("#device");i?.addEventListener("input",o=>this._valueChanged("title",o.target.value)),s?.addEventListener("change",o=>this._valueChanged("device",o.target.value))}_valueChanged(e,t){let i={...this._config,[e]:t||void 0};i.title||delete i.title,i.device||delete i.device;let s=new CustomEvent("config-changed",{detail:{config:i},bubbles:!0,composed:!0});this.dispatchEvent(s)}};customElements.define("opencode-card",I);customElements.define("opencode-card-editor",L);window.customCards=window.customCards||[];window.customCards.push({type:"opencode-card",name:"OpenCode Card",description:"Display OpenCode sessions and their states"});console.info("%c OPENCODE-CARD %c 0.1.0 ","color: white; background: #2196f3; font-weight: bold;","color: #2196f3; background: white; font-weight: bold;");
+    `;let i=this.querySelector("#title"),s=this.querySelector("#device");i?.addEventListener("input",o=>this._valueChanged("title",o.target.value)),s?.addEventListener("change",o=>this._valueChanged("device",o.target.value))}_valueChanged(e,t){let i={...this._config,[e]:t||void 0};i.title||delete i.title,i.device||delete i.device;let s=new CustomEvent("config-changed",{detail:{config:i},bubbles:!0,composed:!0});this.dispatchEvent(s)}};customElements.define("opencode-card",P);customElements.define("opencode-card-editor",z);window.customCards=window.customCards||[];window.customCards.push({type:"opencode-card",name:"OpenCode Card",description:"Display OpenCode sessions and their states"});console.info("%c OPENCODE-CARD %c 0.1.0 ","color: white; background: #2196f3; font-weight: bold;","color: #2196f3; background: white; font-weight: bold;");

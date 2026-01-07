@@ -1722,6 +1722,7 @@ class OpenCodeCard extends HTMLElement {
     const costEntity = device.entities.get("cost");
     const tokensInputEntity = device.entities.get("tokens_input");
     const tokensOutputEntity = device.entities.get("tokens_output");
+    const lastActivityEntity = device.entities.get("last_activity");
 
     const state = stateEntity?.state ?? "unknown";
     const stateConfig = STATE_CONFIG[state] || STATE_CONFIG.unknown;
@@ -1732,6 +1733,10 @@ class OpenCodeCard extends HTMLElement {
     const cost = costEntity?.state ?? "0";
     const tokensIn = tokensInputEntity?.state ?? "0";
     const tokensOut = tokensOutputEntity?.state ?? "0";
+    const lastActivity = lastActivityEntity?.state ?? "";
+    
+    // Format last activity time
+    const activityTime = lastActivity ? formatRelativeTime(lastActivity) : null;
     
     // Agent info from state entity attributes
     const currentAgent = (stateEntity?.attributes?.current_agent as string) || null;
@@ -1772,7 +1777,10 @@ class OpenCodeCard extends HTMLElement {
             <ha-icon icon="${stateConfig.icon}" style="color: ${stateConfig.color}"></ha-icon>
             <span class="status-label" style="color: ${stateConfig.color}">${stateConfig.label}</span>
           </div>
-          <div class="device-name">${device.deviceName.replace("OpenCode - ", "")}</div>
+          <div class="device-name-container">
+            <div class="device-name">${device.deviceName.replace("OpenCode - ", "")}</div>
+            ${activityTime ? `<div class="device-activity" title="${activityTime.tooltip}">${activityTime.display}</div>` : ""}
+          </div>
           <ha-icon icon="mdi:chevron-right" class="device-chevron"></ha-icon>
         </div>
         
@@ -1902,10 +1910,23 @@ class OpenCodeCard extends HTMLElement {
         text-transform: uppercase;
         font-size: 0.85em;
       }
-      .device-name {
+      .device-name-container {
         flex: 1;
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+      }
+      .device-name {
         font-weight: 500;
         color: var(--primary-text-color);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .device-activity {
+        font-size: 0.75em;
+        color: var(--secondary-text-color);
+        margin-top: 2px;
       }
       .device-chevron {
         --mdc-icon-size: 20px;
