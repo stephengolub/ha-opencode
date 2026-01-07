@@ -1,0 +1,142 @@
+# OpenCode Card - GitLab CI Pipeline
+# Home Assistant custom Lovelace card for OpenCode AI sessions
+
+stages:
+  - validate
+  - build
+  - release
+
+variables:
+  NODE_VERSION: "20"
+
+default:
+  image: node:${NODE_VERSION}-alpine
+  cache:
+    key:
+      files:
+        - package-lock.json
+    paths:
+      - node_modules/
+    policy: pull-push
+
+# Install dependencies - shared setup
+.npm-install:
+  before_script:
+    - npm ci
+
+# Validate stage - TypeScript type checking
+typecheck:
+  stage: validate
+  extends: .npm-install
+  script:
+    - npx tsc --noEmit --skipLibCheck src/opencode-card.ts
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# Build stage
+build:
+  stage: build
+  extends: .npm-install
+  script:
+    - npm run build
+    - ls -la dist/
+  artifacts:
+    paths:
+      - dist/opencode-card.js
+    expire_in: 7 days
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+# Build for release - minified production build
+build:release:
+  stage: build
+  extends: .npm-install
+  script:
+    - npm run build
+    - echo "Built opencode-card.js - $(wc -c < dist/opencode-card.js) bytes"
+  artifacts:
+    paths:
+      - dist/opencode-card.js
+    expire_in: 90 days
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+
+# Create GitLab release with the card JS file
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: build:release
+      artifacts: true
+  script:
+    - echo "Creating release for ${CI_COMMIT_TAG}"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    name: "Release $CI_COMMIT_TAG"
+    description: |
+      ## OpenCode Card ${CI_COMMIT_TAG}
+      
+      ### Installation
+      
+      #### HACS (Recommended)
+      1. Add this repository to HACS as a custom repository
+      2. Search for "OpenCode Card" and install
+      3. Restart Home Assistant
+      
+      #### Manual
+      1. Download `opencode-card.js` from the assets below
+      2. Copy to `config/www/opencode-card.js`
+      3. Add to Lovelace resources:
+         ```yaml
+         resources:
+           - url: /local/opencode-card.js
+             type: module
+         ```
+      4. Restart Home Assistant
+    assets:
+      - name: opencode-card.js
+        url: ${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/dist/opencode-card.js?job=build:release
+  rules:
+    - if: $CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/
+
+# Pages job to host the latest card for development/testing
+pages:
+  stage: release
+  needs:
+    - job: build
+      artifacts: true
+  script:
+    - mkdir -p public
+    - cp dist/opencode-card.js public/
+    - |
+      cat > public/index.html << 'EOF'
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>OpenCode Card</title>
+        <style>
+          body { font-family: system-ui; max-width: 800px; margin: 50px auto; padding: 20px; }
+          code { background: #f4f4f4; padding: 2px 6px; border-radius: 4px; }
+          pre { background: #f4f4f4; padding: 16px; border-radius: 8px; overflow-x: auto; }
+        </style>
+      </head>
+      <body>
+        <h1>OpenCode Card</h1>
+        <p>Home Assistant custom Lovelace card for OpenCode AI sessions.</p>
+        <h2>Development Build</h2>
+        <p>Latest build from <code>main</code> branch:</p>
+        <pre><code>resources:
+        - url: ${CI_PAGES_URL}/opencode-card.js
+          type: module</code></pre>
+        <p><a href="opencode-card.js">Download opencode-card.js</a></p>
+      </body>
+      </html>
+      EOF
+  artifacts:
+    paths:
+      - public
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
