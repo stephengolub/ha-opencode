@@ -26,6 +26,7 @@ STATE_ERROR: Final = "error"
 EVENT_STATE_CHANGE: Final = "opencode_state_change"
 EVENT_PERMISSION_REQUEST: Final = "opencode_permission_request"
 EVENT_HISTORY_RESPONSE: Final = "opencode_history_response"
+EVENT_AGENTS_RESPONSE: Final = "opencode_agents_response"
 
 # WebSocket command types
 WS_TYPE_PAIR: Final = "opencode/pair"
@@ -37,6 +38,8 @@ WS_TYPE_COMMAND: Final = "opencode/command"
 WS_TYPE_COMMAND_RESPONSE: Final = "opencode/command_response"
 WS_TYPE_REQUEST_STATE: Final = "opencode/request_state"
 WS_TYPE_STATE_RESPONSE: Final = "opencode/state_response"
+WS_TYPE_HISTORY_RESPONSE: Final = "opencode/history_response"
+WS_TYPE_AGENTS_RESPONSE: Final = "opencode/agents_response"
 
 # Command types (HA -> Plugin)
 CMD_SEND_PROMPT: Final = "send_prompt"

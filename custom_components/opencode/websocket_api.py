@@ -12,7 +12,11 @@ from homeassistant.util import dt as dt_util
 
 from .const import (
     DOMAIN,
+    EVENT_AGENTS_RESPONSE,
+    EVENT_HISTORY_RESPONSE,
+    WS_TYPE_AGENTS_RESPONSE,
     WS_TYPE_CONNECT,
+    WS_TYPE_HISTORY_RESPONSE,
     WS_TYPE_PAIR,
     WS_TYPE_SESSION_REMOVED,
     WS_TYPE_SESSION_UPDATE,
@@ -29,6 +33,8 @@ def async_register_websocket_handlers(hass: HomeAssistant) -> None:
     websocket_api.async_register_command(hass, handle_session_update)
     websocket_api.async_register_command(hass, handle_session_removed)
     websocket_api.async_register_command(hass, handle_state_response)
+    websocket_api.async_register_command(hass, handle_history_response)
+    websocket_api.async_register_command(hass, handle_agents_response)
 
     _LOGGER.debug("Registered OpenCode WebSocket handlers")
 
@@ -297,3 +303,100 @@ def _get_instance_id_by_token(hass: HomeAssistant, token: str) -> str | None:
             if idata.get("token") == token:
                 return instance_id
     return None
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_HISTORY_RESPONSE,
+        vol.Required("instance_token"): str,
+        vol.Required("session_id"): str,
+        vol.Required("session_title"): str,
+        vol.Required("messages"): list,
+        vol.Required("fetched_at"): str,
+        vol.Optional("since"): str,
+        vol.Optional("request_id"): str,
+    }
+)
+@websocket_api.async_response
+async def handle_history_response(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Handle history response from OpenCode plugin."""
+    # Find instance by token (just for validation)
+    instance_token = msg["instance_token"]
+    instance_id = _get_instance_id_by_token(hass, instance_token)
+
+    if not instance_id:
+        connection.send_error(msg["id"], "invalid_token", "Invalid instance token")
+        return
+
+    # Fire an event with the history data
+    hass.bus.async_fire(
+        EVENT_HISTORY_RESPONSE,
+        {
+            "session_id": msg["session_id"],
+            "request_id": msg.get("request_id"),
+            "history": {
+                "type": "history",
+                "session_id": msg["session_id"],
+                "session_title": msg["session_title"],
+                "messages": msg["messages"],
+                "fetched_at": msg["fetched_at"],
+                "since": msg.get("since"),
+                "request_id": msg.get("request_id"),
+            },
+        },
+    )
+
+    connection.send_result(msg["id"], {"success": True})
+
+    _LOGGER.debug(
+        "Received history for session %s: %d messages",
+        msg["session_id"],
+        len(msg["messages"]),
+    )
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): WS_TYPE_AGENTS_RESPONSE,
+        vol.Required("instance_token"): str,
+        vol.Required("session_id"): str,
+        vol.Required("agents"): list,
+        vol.Optional("request_id"): str,
+    }
+)
+@websocket_api.async_response
+async def handle_agents_response(
+    hass: HomeAssistant,
+    connection: websocket_api.ActiveConnection,
+    msg: dict[str, Any],
+) -> None:
+    """Handle agents response from OpenCode plugin."""
+    # Find instance by token (just for validation)
+    instance_token = msg["instance_token"]
+    instance_id = _get_instance_id_by_token(hass, instance_token)
+
+    if not instance_id:
+        connection.send_error(msg["id"], "invalid_token", "Invalid instance token")
+        return
+
+    # Fire an event with the agents data
+    hass.bus.async_fire(
+        EVENT_AGENTS_RESPONSE,
+        {
+            "session_id": msg["session_id"],
+            "request_id": msg.get("request_id"),
+            "agents": msg["agents"],
+        },
+    )
+
+    connection.send_result(msg["id"], {"success": True})
+
+    _LOGGER.debug(
+        "Received agents for session %s: %d agents",
+        msg["session_id"],
+        len(msg["agents"]),
+    )
