@@ -1,0 +1,213 @@
+blueprint:
+  name: OpenCode State Notifications
+  description: >
+    Send notifications to your mobile device when OpenCode sessions need attention.
+    Notifies when:
+    - A task completes (idle after working)
+    - Permission is required (with approve/reject buttons and full details)
+    - An error occurs
+    
+    Works with both iOS and Android via the Home Assistant Companion app.
+    
+    Requires the OpenCode integration to be installed and configured.
+  domain: automation
+  author: ha-opencode
+  source_url: https://github.com/stephengolub/ha-opencode/blob/main/blueprints/automation/opencode_state_notifications.yaml
+  input:
+    notify_service:
+      name: Notification Service
+      description: >
+        The notification service to use (e.g., notify.mobile_app_your_phone).
+      selector:
+        text:
+      default: "notify.mobile_app_phone"
+    
+    notify_on_complete:
+      name: Notify on Task Complete
+      description: Send a notification when a task completes (idle after working).
+      default: true
+      selector:
+        boolean:
+    
+    notify_on_permission:
+      name: Notify on Permission Required
+      description: Send a notification with approve/reject buttons when permission is needed.
+      default: true
+      selector:
+        boolean:
+    
+    notify_on_error:
+      name: Notify on Error
+      description: Send a notification when an error occurs.
+      default: true
+      selector:
+        boolean:
+    
+    notification_channel:
+      name: Notification Channel (Android)
+      description: >
+        Android notification channel name. 
+        You can create channels in the Companion app settings.
+      default: "OpenCode"
+      selector:
+        text:
+    
+    dashboard_path:
+      name: Dashboard Path
+      description: >
+        Path to your OpenCode dashboard for click action (e.g., /lovelace/opencode).
+        Leave empty to use default behavior.
+      default: "/lovelace/opencode"
+      selector:
+        text:
+
+mode: parallel
+max_exceeded: silent
+
+trigger:
+  - platform: event
+    event_type: opencode_state_change
+    id: state_change
+  - platform: event
+    event_type: opencode_permission_request
+    id: permission_request
+
+variables:
+  # Determine which trigger fired
+  trigger_id: "{{ trigger.id }}"
+  
+  # For state_change events
+  new_state: "{{ trigger.event.data.new_state | default('') }}"
+  previous_state: "{{ trigger.event.data.previous_state | default('unknown') }}"
+  session_id: "{{ trigger.event.data.session_id }}"
+  session_title: "{{ trigger.event.data.session_title | default('Task finished') }}"
+  hostname: "{{ trigger.event.data.hostname | default('OpenCode') }}"
+  instance_id: "{{ trigger.event.data.instance_id | default('') }}"
+  
+  # For permission_request events (more detailed)
+  permission_id: "{{ trigger.event.data.permission_id | default('') }}"
+  permission_type: "{{ trigger.event.data.type | default('unknown') }}"
+  permission_title: "{{ trigger.event.data.title | default('Permission Required') }}"
+  permission_pattern: "{{ trigger.event.data.pattern | default('') }}"
+  
+  # Determine if this is a transition we care about
+  was_working: "{{ previous_state == 'working' }}"
+  
+  # Build detailed permission message
+  permission_message: >
+    {% set msg = hostname ~ ": " ~ permission_title %}
+    {% if permission_type and permission_type != 'unknown' %}
+      {% set msg = msg ~ "\nType: " ~ permission_type %}
+    {% endif %}
+    {% if permission_pattern %}
+      {% set msg = msg ~ "\nPattern: " ~ permission_pattern %}
+    {% endif %}
+    {{ msg }}
+
+action:
+  # Log for debugging (can be removed later)
+  - service: system_log.write
+    data:
+      message: >
+        OpenCode event: trigger={{ trigger_id }}, new_state={{ new_state }}, previous_state={{ previous_state }}, 
+        session_id={{ session_id }}, hostname={{ hostname }}, permission_id={{ permission_id }},
+        permission_type={{ permission_type }}, permission_title={{ permission_title }}
+      level: info
+      logger: ha-opencode.blueprint
+
+  - choose:
+      # Permission Request Event (dedicated event with full details)
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger_id == 'permission_request' }}"
+          - condition: template
+            value_template: !input notify_on_permission
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "OpenCode: Permission Required"
+              message: "{{ permission_message }}"
+              data:
+                tag: "opencode-permission-{{ session_id }}"
+                channel: !input notification_channel
+                importance: high
+                priority: high
+                ttl: 0
+                clickAction: !input dashboard_path
+                url: !input dashboard_path
+                actions:
+                  - action: "OPENCODE_APPROVE_{{ session_id }}"
+                    title: "Approve"
+                  - action: "OPENCODE_REJECT_{{ session_id }}"
+                    title: "Reject"
+                # Pass data needed for permission response
+                action_data:
+                  session_id: "{{ session_id }}"
+                  permission_id: "{{ permission_id }}"
+                  instance_id: "{{ instance_id }}"
+
+      # Permission Required (state change - fallback if permission event doesn't fire)
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger_id == 'state_change' and new_state == 'waiting_permission' }}"
+          - condition: template
+            value_template: !input notify_on_permission
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "OpenCode: Permission Required"
+              message: "{{ hostname }}: Permission needed for {{ session_title }}"
+              data:
+                tag: "opencode-permission-{{ session_id }}"
+                channel: !input notification_channel
+                importance: high
+                priority: high
+                ttl: 0
+                clickAction: !input dashboard_path
+                url: !input dashboard_path
+                actions:
+                  - action: "OPENCODE_APPROVE_{{ session_id }}"
+                    title: "Approve"
+                  - action: "OPENCODE_REJECT_{{ session_id }}"
+                    title: "Reject"
+                # Pass data needed for permission response
+                action_data:
+                  session_id: "{{ session_id }}"
+                  instance_id: "{{ instance_id }}"
+
+      # Error Occurred (only after working)
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger_id == 'state_change' and new_state == 'error' and was_working }}"
+          - condition: template
+            value_template: !input notify_on_error
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "OpenCode: Error"
+              message: "{{ hostname }}: An error occurred in {{ session_title }}"
+              data:
+                tag: "opencode-error-{{ session_id }}"
+                channel: !input notification_channel
+                importance: high
+                priority: high
+                ttl: 0
+                clickAction: !input dashboard_path
+                url: !input dashboard_path
+
+      # Work Complete (idle after working)
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger_id == 'state_change' and new_state == 'idle' and was_working }}"
+          - condition: template
+            value_template: !input notify_on_complete
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "OpenCode: Task Complete"
+              message: "{{ hostname }}: {{ session_title }}"
+              data:
+                tag: "opencode-complete-{{ session_id }}"
+                channel: !input notification_channel
+                clickAction: !input dashboard_path
+                url: !input dashboard_path

@@ -1,0 +1,122 @@
+blueprint:
+  name: OpenCode Permission Response Handler
+  description: >
+    Handles approve/reject actions from OpenCode permission notifications.
+    
+    This blueprint listens for notification actions (button taps) and sends
+    the appropriate permission response via the OpenCode integration service.
+    
+    Works with both iOS and Android via the Home Assistant Companion app.
+    
+    Use this together with the OpenCode State Notifications blueprint.
+  domain: automation
+  author: ha-opencode
+  source_url: https://github.com/stephengolub/ha-opencode/blob/main/blueprints/automation/opencode_permission_response.yaml
+  input: {}
+
+mode: parallel
+max_exceeded: silent
+
+trigger:
+  - platform: event
+    event_type: mobile_app_notification_action
+
+variables:
+  # Get the action string
+  action: "{{ trigger.event.data.action | default('') }}"
+  
+  # Check if this is an OpenCode action
+  is_opencode_action: >
+    {{ action.startswith('OPENCODE_APPROVE_') or action.startswith('OPENCODE_REJECT_') }}
+  
+  is_approve: "{{ action.startswith('OPENCODE_APPROVE_') }}"
+  response: "{{ 'once' if is_approve else 'reject' }}"
+  
+  # Extract session_id from action name (after the prefix)
+  session_id_from_action: >
+    {% if action.startswith('OPENCODE_APPROVE_') %}
+      {{ action[17:] }}
+    {% elif action.startswith('OPENCODE_REJECT_') %}
+      {{ action[16:] }}
+    {% else %}
+      
+    {% endif %}
+  
+  # Get data passed from the notification
+  # iOS uses action_data, Android might use data directly
+  action_data: >
+    {% if trigger.event.data.action_data is defined %}
+      {{ trigger.event.data.action_data }}
+    {% elif trigger.event.data.data is defined %}
+      {{ trigger.event.data.data }}
+    {% else %}
+      {}
+    {% endif %}
+  
+  session_id: "{{ action_data.session_id | default(session_id_from_action) | trim }}"
+  permission_id: "{{ action_data.permission_id | default('') | trim }}"
+
+condition:
+  - condition: template
+    value_template: "{{ is_opencode_action }}"
+
+action:
+  # Log for debugging
+  - service: system_log.write
+    data:
+      message: >
+        OpenCode permission response: action={{ action }}, is_approve={{ is_approve }}, 
+        response={{ response }}, session_id={{ session_id }}, permission_id={{ permission_id }},
+        action_data={{ action_data }}
+      level: info
+      logger: ha-opencode.permission
+
+  # Check we have required data before calling service
+  - condition: template
+    value_template: "{{ session_id != '' }}"
+
+  # If we have a permission_id, use it. Otherwise, try to get it from the entity.
+  - choose:
+      # With permission_id from notification
+      - conditions:
+          - condition: template
+            value_template: "{{ permission_id != '' }}"
+        sequence:
+          - service: opencode.respond_permission
+            data:
+              session_id: "{{ session_id }}"
+              permission_id: "{{ permission_id }}"
+              response: "{{ response }}"
+
+      # Without permission_id - look it up from the permission_pending sensor
+      - conditions:
+          - condition: template
+            value_template: "{{ permission_id == '' }}"
+        sequence:
+          # Try to find the permission_id from HA entities
+          - variables:
+              # Find the permission_pending entity for this session
+              found_permission_id: >
+                {% set ns = namespace(perm_id='') %}
+                {% for state in states.binary_sensor if 'permission_pending' in state.entity_id %}
+                  {% if state.attributes.get('session_id', '') == session_id or session_id in state.entity_id %}
+                    {% set ns.perm_id = state.attributes.get('permission_id', '') %}
+                  {% endif %}
+                {% endfor %}
+                {{ ns.perm_id }}
+          
+          - condition: template
+            value_template: "{{ found_permission_id != '' }}"
+          
+          - service: opencode.respond_permission
+            data:
+              session_id: "{{ session_id }}"
+              permission_id: "{{ found_permission_id }}"
+              response: "{{ response }}"
+
+  # Log success
+  - service: system_log.write
+    data:
+      message: "OpenCode permission {{ response }} sent for session {{ session_id }}"
+      level: info
+      logger: ha-opencode.permission
