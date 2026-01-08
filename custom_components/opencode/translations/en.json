@@ -1,0 +1,115 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up OpenCode",
+        "description": "This integration allows OpenCode instances to connect and be controlled from Home Assistant.\n\nAfter setup, use the integration options to pair OpenCode instances."
+      }
+    },
+    "abort": {
+      "already_configured": "OpenCode is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "menu": {
+        "title": "OpenCode Options",
+        "menu_options": {
+          "pair_new": "Pair new instance",
+          "manage_instances": "Manage instances"
+        }
+      },
+      "pair_new": {
+        "title": "Pair New Instance",
+        "description": "Enter this pairing code in your OpenCode instance:\n\n**{pairing_code}**\n\nRun `/ha-pair` in OpenCode and enter:\n- Home Assistant URL: Your HA URL\n- Pairing Code: {pairing_code}\n\nThis code expires in 5 minutes."
+      },
+      "manage_instances": {
+        "title": "Manage Instances",
+        "description": "Connected OpenCode instances:\n\n{instances}"
+      }
+    },
+    "abort": {
+      "not_ready": "Integration is not ready"
+    }
+  },
+  "services": {
+    "send_prompt": {
+      "name": "Send Prompt",
+      "description": "Send a prompt to an OpenCode session",
+      "fields": {
+        "session_id": {
+          "name": "Session ID",
+          "description": "The session ID to send the prompt to"
+        },
+        "text": {
+          "name": "Prompt Text",
+          "description": "The prompt message to send"
+        },
+        "agent": {
+          "name": "Agent",
+          "description": "Optional agent to use for this prompt"
+        }
+      }
+    },
+    "respond_permission": {
+      "name": "Respond to Permission",
+      "description": "Approve or reject a permission request",
+      "fields": {
+        "session_id": {
+          "name": "Session ID",
+          "description": "The session ID with the pending permission"
+        },
+        "permission_id": {
+          "name": "Permission ID",
+          "description": "The permission request ID to respond to"
+        },
+        "response": {
+          "name": "Response",
+          "description": "How to respond to the permission request"
+        }
+      }
+    },
+    "abort_session": {
+      "name": "Abort Session",
+      "description": "Abort a running OpenCode session",
+      "fields": {
+        "session_id": {
+          "name": "Session ID",
+          "description": "The session ID to abort"
+        }
+      }
+    },
+    "get_history": {
+      "name": "Get Session History",
+      "description": "Retrieve conversation history for a session",
+      "fields": {
+        "session_id": {
+          "name": "Session ID",
+          "description": "The session ID to get history for"
+        },
+        "since": {
+          "name": "Since",
+          "description": "Optional ISO timestamp to get history since"
+        },
+        "request_id": {
+          "name": "Request ID",
+          "description": "Optional request ID for correlating the response event"
+        }
+      }
+    },
+    "get_agents": {
+      "name": "Get Available Agents",
+      "description": "Get list of available agents for a session",
+      "fields": {
+        "session_id": {
+          "name": "Session ID",
+          "description": "The session ID to get agents for"
+        },
+        "request_id": {
+          "name": "Request ID",
+          "description": "Optional request ID for correlating the response event"
+        }
+      }
+    }
+  }
+}

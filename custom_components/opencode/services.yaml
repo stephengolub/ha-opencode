@@ -1,0 +1,116 @@
+send_prompt:
+  name: Send Prompt
+  description: Send a prompt to an OpenCode session
+  fields:
+    session_id:
+      name: Session ID
+      description: The session ID to send the prompt to
+      required: true
+      example: "ses_abc123def456"
+      selector:
+        text:
+    text:
+      name: Prompt Text
+      description: The prompt message to send
+      required: true
+      example: "Please help me implement this feature"
+      selector:
+        text:
+          multiline: true
+    agent:
+      name: Agent
+      description: Optional agent to use for this prompt
+      required: false
+      example: "explore"
+      selector:
+        text:
+
+respond_permission:
+  name: Respond to Permission
+  description: Approve or reject a permission request
+  fields:
+    session_id:
+      name: Session ID
+      description: The session ID with the pending permission
+      required: true
+      example: "ses_abc123def456"
+      selector:
+        text:
+    permission_id:
+      name: Permission ID
+      description: The permission request ID to respond to
+      required: true
+      example: "perm_xyz789"
+      selector:
+        text:
+    response:
+      name: Response
+      description: How to respond to the permission request
+      required: true
+      example: "once"
+      selector:
+        select:
+          options:
+            - label: "Allow Once"
+              value: "once"
+            - label: "Always Allow"
+              value: "always"
+            - label: "Reject"
+              value: "reject"
+
+abort_session:
+  name: Abort Session
+  description: Abort a running OpenCode session
+  fields:
+    session_id:
+      name: Session ID
+      description: The session ID to abort
+      required: true
+      example: "ses_abc123def456"
+      selector:
+        text:
+
+get_history:
+  name: Get Session History
+  description: Retrieve conversation history for a session. Results are returned via the opencode_history_response event.
+  fields:
+    session_id:
+      name: Session ID
+      description: The session ID to get history for
+      required: true
+      example: "ses_abc123def456"
+      selector:
+        text:
+    since:
+      name: Since
+      description: Optional ISO timestamp to get history since (for incremental updates)
+      required: false
+      example: "2025-01-07T12:00:00Z"
+      selector:
+        text:
+    request_id:
+      name: Request ID
+      description: Optional request ID for correlating the response event
+      required: false
+      example: "req_123"
+      selector:
+        text:
+
+get_agents:
+  name: Get Available Agents
+  description: Get list of available agents for a session. Results are returned via the opencode_agents_response event.
+  fields:
+    session_id:
+      name: Session ID
+      description: The session ID to get agents for
+      required: true
+      example: "ses_abc123def456"
+      selector:
+        text:
+    request_id:
+      name: Request ID
+      description: Optional request ID for correlating the response event
+      required: false
+      example: "req_123"
+      selector:
+        text:

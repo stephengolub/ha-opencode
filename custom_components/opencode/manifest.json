@@ -1,0 +1,12 @@
+{
+  "domain": "opencode",
+  "name": "OpenCode",
+  "codeowners": ["@stephengolub"],
+  "config_flow": true,
+  "dependencies": ["websocket_api"],
+  "documentation": "https://gitlab.com/opencode-home-assistant/ha-integration",
+  "iot_class": "local_push",
+  "issue_tracker": "https://gitlab.com/opencode-home-assistant/ha-integration/-/issues",
+  "requirements": [],
+  "version": "1.0.0"
+}

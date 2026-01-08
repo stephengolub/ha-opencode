@@ -1,6 +1,8 @@
 /**
  * OpenCode Card - Home Assistant Custom Card
  * Displays OpenCode sessions with their states
+ * 
+ * Native integration version - uses HA services and events instead of MQTT
  */
 
 interface HomeAssistant {
@@ -39,6 +41,7 @@ interface EntityRegistryEntry {
 interface OpenCodeDevice {
   deviceId: string;
   deviceName: string;
+  sessionId: string;
   entities: Map<string, HassEntity>;
 }
 
@@ -56,22 +59,13 @@ interface AgentInfo {
   mode: "subagent" | "primary" | "all";
 }
 
-interface AgentsResponse {
-  type: "agents";
-  request_id?: string;
-  agents: AgentInfo[];
-}
-
 interface PermissionDetails {
   permission_id: string;
   type: string;
   title: string;
   session_id: string;
-  message_id: string;
-  call_id?: string;
   pattern?: string;
   metadata?: Record<string, unknown>;
-  commandTopic: string;
 }
 
 // History types matching plugin output
@@ -112,9 +106,29 @@ interface CachedHistory {
   lastFetched: string;
 }
 
+interface StateChangeEvent {
+  session_id: string;
+  previous_state: string;
+  new_state: string;
+  hostname: string;
+  session_title: string;
+}
+
+interface HistoryResponseEvent {
+  session_id: string;
+  request_id?: string;
+  history: HistoryResponse;
+}
+
+interface AgentsResponseEvent {
+  session_id: string;
+  request_id?: string;
+  agents: AgentInfo[];
+}
+
 // Cache key helper
-function getHistoryCacheKey(deviceId: string): string {
-  return `opencode_history_${deviceId}`;
+function getHistoryCacheKey(sessionId: string): string {
+  return `opencode_history_${sessionId}`;
 }
 
 // Time formatting helper
@@ -179,23 +193,21 @@ class OpenCodeCard extends HTMLElement {
   private _initialized = false;
   private _showPermissionModal = false;
   private _activePermission: PermissionDetails | null = null;
-  private _selectedDeviceId: string | null = null; // For navigating into a device from list view
+  private _selectedDeviceId: string | null = null;
   private _showHistoryView = false;
   private _historyLoading = false;
   private _historyData: HistoryResponse | null = null;
+  private _historySessionId: string | null = null;
   private _historyDeviceId: string | null = null;
-  private _historyCommandTopic: string | null = null;
-  private _historyResponseTopic: string | null = null;
-  private _mqttUnsubscribe: (() => void) | null = null;
   // Lazy loading state
-  private _historyVisibleCount = 10; // Number of messages to show initially
+  private _historyVisibleCount = 10;
   private _historyLoadingMore = false;
-  private static readonly HISTORY_PAGE_SIZE = 10; // Messages to load per scroll
+  private static readonly HISTORY_PAGE_SIZE = 10;
   // Scroll tracking
   private _isAtBottom = true;
-  // Track pending permissions per device (persists even if entity state lags)
+  // Track pending permissions per device
   private _pendingPermissions: Map<string, PermissionDetails> = new Map();
-  // Track last rendered state to avoid unnecessary re-renders
+  // Track last rendered state
   private _lastRenderHash: string = "";
   // Agent selection
   private _availableAgents: AgentInfo[] = [];
@@ -204,6 +216,12 @@ class OpenCodeCard extends HTMLElement {
   // Auto-refresh when working
   private _autoRefreshInterval: ReturnType<typeof setInterval> | null = null;
   private _lastDeviceState: string | null = null;
+  // Sorting
+  private _sortMode: "activity" | "name" = "activity";
+  // Event subscriptions
+  private _stateChangeUnsubscribe: (() => void) | null = null;
+  private _historyResponseUnsubscribe: (() => void) | null = null;
+  private _agentsResponseUnsubscribe: (() => void) | null = null;
 
   set hass(hass: HomeAssistant) {
     this._hass = hass;
@@ -212,39 +230,32 @@ class OpenCodeCard extends HTMLElement {
     } else {
       this._updateDevices();
       
-      // Check for state changes on the active chat device
       if (this._showHistoryView && this._historyDeviceId) {
         const device = this._devices.get(this._historyDeviceId);
         const stateEntity = device?.entities.get("state");
         const currentState = stateEntity?.state ?? "unknown";
         
-        // If state changed, refresh history
         if (this._lastDeviceState !== null && this._lastDeviceState !== currentState) {
           this._refreshHistory();
         }
         this._lastDeviceState = currentState;
-        
-        // Manage auto-refresh interval based on working state
         this._manageAutoRefresh(currentState);
         return;
       }
       
       if (this._showPermissionModal && this._activePermission) {
-        // Check if we now have full details when we didn't before
         const deviceId = this._findDeviceIdForPermission(this._activePermission);
         if (deviceId) {
           const updatedPermission = this._pendingPermissions.get(deviceId);
           if (updatedPermission && updatedPermission.permission_id && !this._activePermission.permission_id) {
-            // We got the full details - update and re-render
             this._activePermission = updatedPermission;
             this._render();
             return;
           }
         }
-        // Otherwise skip re-render to prevent losing focus
         return;
       }
-      // Only re-render if relevant state has changed
+      
       const currentHash = this._computeStateHash();
       if (currentHash !== this._lastRenderHash) {
         this._lastRenderHash = currentHash;
@@ -257,7 +268,6 @@ class OpenCodeCard extends HTMLElement {
     const refreshInterval = (this._config?.working_refresh_interval ?? 10) * 1000;
     
     if (currentState === "working") {
-      // Start auto-refresh if not already running
       if (!this._autoRefreshInterval) {
         this._autoRefreshInterval = setInterval(() => {
           if (this._showHistoryView && !this._historyLoading) {
@@ -266,7 +276,6 @@ class OpenCodeCard extends HTMLElement {
         }, refreshInterval);
       }
     } else {
-      // Stop auto-refresh when not working
       if (this._autoRefreshInterval) {
         clearInterval(this._autoRefreshInterval);
         this._autoRefreshInterval = null;
@@ -275,7 +284,6 @@ class OpenCodeCard extends HTMLElement {
   }
 
   private _computeStateHash(): string {
-    // Create a hash of the state that affects rendering
     const hashParts: string[] = [];
     
     for (const [deviceId, device] of this._devices) {
@@ -286,22 +294,19 @@ class OpenCodeCard extends HTMLElement {
       const costEntity = device.entities.get("cost");
       const tokensInEntity = device.entities.get("tokens_input");
       const tokensOutEntity = device.entities.get("tokens_output");
-      const permissionEntity = device.entities.get("permission");
+      const permissionEntity = device.entities.get("permission_pending");
       const activityEntity = device.entities.get("last_activity");
       
-      // Include agent attributes from state entity
       const agent = stateEntity?.attributes?.agent as string | null;
       const currentAgent = stateEntity?.attributes?.current_agent as string | null;
       
       hashParts.push(`${deviceId}:${stateEntity?.state}:${sessionEntity?.state}:${modelEntity?.state}:${toolEntity?.state}:${costEntity?.state}:${tokensInEntity?.state}:${tokensOutEntity?.state}:${permissionEntity?.state}:${activityEntity?.state}:${agent}:${currentAgent}`);
       
-      // Include permission attributes if pending
-      if (permissionEntity?.state === "pending") {
+      if (permissionEntity?.state === "on") {
         hashParts.push(`perm:${permissionEntity.attributes?.permission_id}`);
       }
     }
     
-    // Include pending permissions
     for (const [deviceId, perm] of this._pendingPermissions) {
       hashParts.push(`pending:${deviceId}:${perm.permission_id}`);
     }
@@ -311,9 +316,7 @@ class OpenCodeCard extends HTMLElement {
 
   private _findDeviceIdForPermission(permission: PermissionDetails): string | null {
     for (const [deviceId, device] of this._devices) {
-      const deviceIdEntity = device.entities.get("device_id");
-      const commandTopic = deviceIdEntity?.attributes?.command_topic as string;
-      if (commandTopic === permission.commandTopic) {
+      if (device.sessionId === permission.session_id) {
         return deviceId;
       }
     }
@@ -329,17 +332,79 @@ class OpenCodeCard extends HTMLElement {
     
     this._initialized = true;
     
-    // Fetch device and entity registries
     await this._fetchRegistries();
     this._updateDevices();
+    await this._setupEventSubscriptions();
     this._render();
+  }
+
+  private async _setupEventSubscriptions() {
+    if (!this._hass) return;
+
+    // Subscribe to state changes
+    this._stateChangeUnsubscribe = await this._hass.connection.subscribeEvents(
+      (event: unknown) => {
+        const data = (event as { data: StateChangeEvent }).data;
+        // Trigger re-render on state changes
+        this._updateDevices();
+        const currentHash = this._computeStateHash();
+        if (currentHash !== this._lastRenderHash) {
+          this._lastRenderHash = currentHash;
+          this._render();
+        }
+      },
+      "opencode_state_change"
+    );
+
+    // Subscribe to history responses
+    this._historyResponseUnsubscribe = await this._hass.connection.subscribeEvents(
+      (event: unknown) => {
+        const data = (event as { data: HistoryResponseEvent }).data;
+        if (this._historySessionId && data.session_id === this._historySessionId) {
+          this._handleHistoryResponse(data.history);
+        }
+      },
+      "opencode_history_response"
+    );
+
+    // Subscribe to agents responses
+    this._agentsResponseUnsubscribe = await this._hass.connection.subscribeEvents(
+      (event: unknown) => {
+        const data = (event as { data: AgentsResponseEvent }).data;
+        if (this._historySessionId && data.session_id === this._historySessionId) {
+          this._availableAgents = data.agents;
+          this._agentsLoading = false;
+          this._render();
+        }
+      },
+      "opencode_agents_response"
+    );
+  }
+
+  disconnectedCallback() {
+    // Clean up subscriptions
+    if (this._stateChangeUnsubscribe) {
+      this._stateChangeUnsubscribe();
+      this._stateChangeUnsubscribe = null;
+    }
+    if (this._historyResponseUnsubscribe) {
+      this._historyResponseUnsubscribe();
+      this._historyResponseUnsubscribe = null;
+    }
+    if (this._agentsResponseUnsubscribe) {
+      this._agentsResponseUnsubscribe();
+      this._agentsResponseUnsubscribe = null;
+    }
+    if (this._autoRefreshInterval) {
+      clearInterval(this._autoRefreshInterval);
+      this._autoRefreshInterval = null;
+    }
   }
 
   private async _fetchRegistries() {
     if (!this._hass) return;
 
     try {
-      // Fetch device registry
       const deviceResponse = await this._hass.callWS({
         type: "config/device_registry/list",
       }) as DeviceRegistryEntry[];
@@ -350,13 +415,13 @@ class OpenCodeCard extends HTMLElement {
         }
       }
 
-      // Fetch entity registry
       const entityResponse = await this._hass.callWS({
         type: "config/entity_registry/list",
       }) as EntityRegistryEntry[];
 
       for (const entity of entityResponse) {
-        if (entity.platform === "mqtt" && this._deviceRegistry.has(entity.device_id)) {
+        // Changed from "mqtt" to "opencode"
+        if (entity.platform === "opencode" && this._deviceRegistry.has(entity.device_id)) {
           this._entityRegistry.set(entity.entity_id, entity);
         }
       }
@@ -370,7 +435,6 @@ class OpenCodeCard extends HTMLElement {
 
     this._devices.clear();
 
-    // Group entities by device
     for (const [entityId, entityEntry] of this._entityRegistry) {
       const device = this._deviceRegistry.get(entityEntry.device_id);
       if (!device) continue;
@@ -380,29 +444,28 @@ class OpenCodeCard extends HTMLElement {
 
       let openCodeDevice = this._devices.get(device.id);
       if (!openCodeDevice) {
+        // Extract session ID from state entity attributes or device sw_version
+        const sessionId = device.identifiers?.[0]?.[1]?.replace("opencode_", "ses_") || "";
+        
         openCodeDevice = {
           deviceId: device.id,
           deviceName: device.name,
+          sessionId: sessionId,
           entities: new Map(),
         };
         this._devices.set(device.id, openCodeDevice);
       }
 
       // Extract entity key from unique_id
-      // Format: "{deviceId}_{key}" where deviceId is like "opencode_global" and key is like "device_id"
-      // So unique_id "opencode_global_device_id" should give key "device_id"
       const uniqueId = entityEntry.unique_id || "";
-      
-      // Find the device identifier prefix (e.g., "opencode_global") from device identifiers
-      // Then remove it to get the entity key
-      let entityKey = "";
       const deviceIdentifier = device.identifiers?.[0]?.[1] || "";
+      let entityKey = "";
+      
       if (deviceIdentifier && uniqueId.startsWith(deviceIdentifier + "_")) {
         entityKey = uniqueId.slice(deviceIdentifier.length + 1);
       } else {
-        // Fallback: try to match known keys at the end of unique_id
-        const knownKeys = ["device_id", "state", "session_title", "model", "current_tool", 
-                          "tokens_input", "tokens_output", "cost", "last_activity", "permission"];
+        const knownKeys = ["state", "session_title", "model", "current_tool", 
+                          "tokens_input", "tokens_output", "cost", "last_activity", "permission_pending"];
         for (const key of knownKeys) {
           if (uniqueId.endsWith("_" + key)) {
             entityKey = key;
@@ -416,52 +479,36 @@ class OpenCodeCard extends HTMLElement {
       }
     }
 
-    // Update pending permissions tracking
     this._updatePendingPermissions();
   }
 
   private _updatePendingPermissions() {
     for (const [deviceId, device] of this._devices) {
-      const permissionEntity = device.entities.get("permission");
+      const permissionEntity = device.entities.get("permission_pending");
       const stateEntity = device.entities.get("state");
-      const deviceIdEntity = device.entities.get("device_id");
 
-      // If permission entity shows "pending" with valid attributes, capture it
-      if (permissionEntity?.state === "pending" && permissionEntity.attributes) {
+      // Binary sensor: "on" means permission is pending
+      if (permissionEntity?.state === "on" && permissionEntity.attributes) {
         const attrs = permissionEntity.attributes;
-        if (attrs.permission_id && attrs.title) {
+        if (attrs.permission_id && attrs.permission_title) {
           this._pendingPermissions.set(deviceId, {
             permission_id: attrs.permission_id as string,
-            type: attrs.type as string || "unknown",
-            title: attrs.title as string,
-            session_id: attrs.session_id as string || "",
-            message_id: attrs.message_id as string || "",
-            call_id: attrs.call_id as string | undefined,
+            type: attrs.permission_type as string || "unknown",
+            title: attrs.permission_title as string,
+            session_id: device.sessionId,
             pattern: attrs.pattern as string | undefined,
             metadata: attrs.metadata as Record<string, unknown> | undefined,
-            commandTopic: (deviceIdEntity?.attributes?.command_topic as string) ?? "",
           });
         }
-      }
-      // If state is no longer waiting_permission or permission is "none", clear tracking
-      else if (stateEntity?.state !== "waiting_permission" || permissionEntity?.state === "none") {
+      } else if (stateEntity?.state !== "waiting_permission" || permissionEntity?.state === "off") {
         this._pendingPermissions.delete(deviceId);
-      }
-      // If state IS waiting_permission but we don't have permission details yet,
-      // try to build from deviceIdEntity at least (for command topic)
-      else if (stateEntity?.state === "waiting_permission" && !this._pendingPermissions.has(deviceId)) {
-        // Store a partial permission - we have the command topic but not full details
-        const commandTopic = (deviceIdEntity?.attributes?.command_topic as string) ?? "";
-        if (commandTopic) {
-          this._pendingPermissions.set(deviceId, {
-            permission_id: "",  // Will be filled when permission entity updates
-            type: "pending",
-            title: "Permission Required",
-            session_id: "",
-            message_id: "",
-            commandTopic,
-          });
-        }
+      } else if (stateEntity?.state === "waiting_permission" && !this._pendingPermissions.has(deviceId)) {
+        this._pendingPermissions.set(deviceId, {
+          permission_id: "",
+          type: "pending",
+          title: "Permission Required",
+          session_id: device.sessionId,
+        });
       }
     }
   }
@@ -472,19 +519,14 @@ class OpenCodeCard extends HTMLElement {
   }
 
   private _getPermissionDetails(device: OpenCodeDevice): PermissionDetails | null {
-    // First check our tracked permissions (more reliable, persists across timing issues)
     const tracked = this._pendingPermissions.get(device.deviceId);
     if (tracked && tracked.permission_id) {
       return tracked;
     }
 
-    // Fall back to direct entity check
-    const permissionEntity = device.entities.get("permission");
-    const deviceIdEntity = device.entities.get("device_id");
+    const permissionEntity = device.entities.get("permission_pending");
     
-    if (permissionEntity?.state !== "pending" || !permissionEntity.attributes) {
-      // If we have a tracked permission without full details, return it anyway
-      // (allows clicking the alert even if permission_id isn't set yet)
+    if (permissionEntity?.state !== "on" || !permissionEntity.attributes) {
       if (tracked) {
         return tracked;
       }
@@ -494,14 +536,11 @@ class OpenCodeCard extends HTMLElement {
     const attrs = permissionEntity.attributes;
     return {
       permission_id: attrs.permission_id as string,
-      type: attrs.type as string,
-      title: attrs.title as string,
-      session_id: attrs.session_id as string,
-      message_id: attrs.message_id as string,
-      call_id: attrs.call_id as string | undefined,
+      type: attrs.permission_type as string,
+      title: attrs.permission_title as string,
+      session_id: device.sessionId,
       pattern: attrs.pattern as string | undefined,
       metadata: attrs.metadata as Record<string, unknown> | undefined,
-      commandTopic: (deviceIdEntity?.attributes?.command_topic as string) ?? "",
     };
   }
 
@@ -532,10 +571,10 @@ class OpenCodeCard extends HTMLElement {
   }
 
   private async _sendChatMessage(text: string) {
-    if (!this._hass || !this._historyCommandTopic || !text.trim()) return;
+    if (!this._hass || !this._historySessionId || !text.trim()) return;
 
     try {
-      // Optimistically add user message to history
+      // Optimistically add user message
       if (this._historyData) {
         const userMessage: HistoryMessage = {
           id: `temp_${Date.now()}`,
@@ -546,7 +585,6 @@ class OpenCodeCard extends HTMLElement {
         this._historyData.messages.push(userMessage);
         this._render();
         
-        // Scroll to bottom
         setTimeout(() => {
           const historyBody = this.querySelector(".history-body");
           if (historyBody) {
@@ -555,120 +593,67 @@ class OpenCodeCard extends HTMLElement {
         }, 0);
       }
 
-      const payload: Record<string, unknown> = {
-        command: "prompt",
+      // Call the opencode.send_prompt service
+      const serviceData: Record<string, unknown> = {
+        session_id: this._historySessionId,
         text: text.trim(),
       };
       
-      // Include agent if selected
       if (this._selectedAgent) {
-        payload.agent = this._selectedAgent;
+        serviceData.agent = this._selectedAgent;
       }
 
-      await this._hass.callService("mqtt", "publish", {
-        topic: this._historyCommandTopic,
-        payload: JSON.stringify(payload),
-      });
+      await this._hass.callService("opencode", "send_prompt", serviceData);
     } catch (err) {
       console.error("[opencode-card] Failed to send chat message:", err);
     }
   }
 
-  private async _showHistory(deviceId: string, commandTopic: string, responseTopic: string) {
+  private async _showHistory(deviceId: string, sessionId: string) {
     this._historyDeviceId = deviceId;
-    this._historyCommandTopic = commandTopic;
-    this._historyResponseTopic = responseTopic;
+    this._historySessionId = sessionId;
     this._showHistoryView = true;
     this._historyLoading = true;
     this._selectedAgent = null;
     
-    // Track current state for auto-refresh
     const device = this._devices.get(deviceId);
     const stateEntity = device?.entities.get("state");
     this._lastDeviceState = stateEntity?.state ?? "unknown";
     
-    // Start auto-refresh if currently working
     this._manageAutoRefresh(this._lastDeviceState);
-    
     this._render();
 
-    // Fetch agents in parallel with history
+    // Fetch agents
     this._fetchAgents();
 
     // Check cache first
-    const cached = this._loadHistoryFromCache(deviceId);
+    const cached = this._loadHistoryFromCache(sessionId);
     if (cached) {
       this._historyData = cached.data;
       this._historyLoading = false;
       this._render();
-      
-      // Fetch updates since last fetch
       await this._fetchHistorySince(cached.lastFetched);
     } else {
-      // Fetch full history
       await this._fetchFullHistory();
     }
   }
   
   private async _fetchAgents() {
-    if (!this._hass || !this._historyCommandTopic || !this._historyResponseTopic) return;
+    if (!this._hass || !this._historySessionId) return;
     
     this._agentsLoading = true;
     
-    const requestId = `agents_${Date.now()}`;
-    
     try {
-      // Subscribe to response
-      const unsubscribe = await this._hass.connection.subscribeMessage(
-        (event: unknown) => {
-          const triggerEvent = event as { 
-            variables?: { 
-              trigger?: { 
-                topic?: string; 
-                payload?: string;
-                payload_json?: Record<string, unknown>;
-              } 
-            } 
-          };
-          
-          const trigger = triggerEvent.variables?.trigger;
-          if (trigger?.topic === this._historyResponseTopic) {
-            try {
-              const response = (trigger.payload_json || JSON.parse(trigger.payload || "{}")) as AgentsResponse;
-              if (response.type === "agents" && (!response.request_id || response.request_id === requestId)) {
-                this._availableAgents = response.agents;
-                this._agentsLoading = false;
-                this._render();
-                unsubscribe();
-              }
-            } catch (err) {
-              console.error("[opencode-card] Failed to parse agents response:", err);
-            }
-          }
-        },
-        {
-          type: "subscribe_trigger",
-          trigger: {
-            platform: "mqtt",
-            topic: this._historyResponseTopic,
-          },
-        }
-      );
-
-      // Send agents request
-      await this._hass.callService("mqtt", "publish", {
-        topic: this._historyCommandTopic,
-        payload: JSON.stringify({
-          command: "get_agents",
-          request_id: requestId,
-        }),
+      await this._hass.callService("opencode", "get_agents", {
+        session_id: this._historySessionId,
+        request_id: `agents_${Date.now()}`,
       });
 
-      // Auto-unsubscribe after 10 seconds (timeout)
+      // Response comes via event subscription
       setTimeout(() => {
         if (this._agentsLoading) {
           this._agentsLoading = false;
-          unsubscribe();
+          this._render();
         }
       }, 10000);
     } catch (err) {
@@ -682,16 +667,14 @@ class OpenCodeCard extends HTMLElement {
     this._historyLoading = false;
     this._historyData = null;
     this._historyDeviceId = null;
-    this._historyCommandTopic = null;
-    this._historyResponseTopic = null;
-    this._historyVisibleCount = 10; // Reset for next open
-    this._isAtBottom = true; // Reset scroll state
+    this._historySessionId = null;
+    this._historyVisibleCount = 10;
+    this._isAtBottom = true;
     this._availableAgents = [];
     this._selectedAgent = null;
     this._agentsLoading = false;
     this._lastDeviceState = null;
     
-    // Stop auto-refresh
     if (this._autoRefreshInterval) {
       clearInterval(this._autoRefreshInterval);
       this._autoRefreshInterval = null;
@@ -705,7 +688,6 @@ class OpenCodeCard extends HTMLElement {
     if (historyBody) {
       historyBody.scrollTop = historyBody.scrollHeight;
       this._isAtBottom = true;
-      // Update button visibility
       const scrollBtn = this.querySelector(".scroll-to-bottom-btn");
       if (scrollBtn) {
         scrollBtn.classList.add("hidden");
@@ -713,9 +695,9 @@ class OpenCodeCard extends HTMLElement {
     }
   }
 
-  private _loadHistoryFromCache(deviceId: string): CachedHistory | null {
+  private _loadHistoryFromCache(sessionId: string): CachedHistory | null {
     try {
-      const cached = localStorage.getItem(getHistoryCacheKey(deviceId));
+      const cached = localStorage.getItem(getHistoryCacheKey(sessionId));
       if (cached) {
         return JSON.parse(cached) as CachedHistory;
       }
@@ -725,35 +707,27 @@ class OpenCodeCard extends HTMLElement {
     return null;
   }
 
-  private _saveHistoryToCache(deviceId: string, data: HistoryResponse) {
+  private _saveHistoryToCache(sessionId: string, data: HistoryResponse) {
     try {
       const cached: CachedHistory = {
         data,
         lastFetched: data.fetched_at,
       };
-      localStorage.setItem(getHistoryCacheKey(deviceId), JSON.stringify(cached));
+      localStorage.setItem(getHistoryCacheKey(sessionId), JSON.stringify(cached));
     } catch (err) {
       console.error("[opencode-card] Failed to save history to cache:", err);
     }
   }
 
   private async _fetchFullHistory() {
-    if (!this._hass || !this._historyCommandTopic || !this._historyResponseTopic || !this._historyDeviceId) return;
+    if (!this._hass || !this._historySessionId) return;
 
-    const requestId = `req_${Date.now()}`;
-
-    // Subscribe to response topic
-    await this._subscribeToResponse(requestId);
-
-    // Send get_history command
     try {
-      await this._hass.callService("mqtt", "publish", {
-        topic: this._historyCommandTopic,
-        payload: JSON.stringify({
-          command: "get_history",
-          request_id: requestId,
-        }),
+      await this._hass.callService("opencode", "get_history", {
+        session_id: this._historySessionId,
+        request_id: `req_${Date.now()}`,
       });
+      // Response comes via event subscription
     } catch (err) {
       console.error("[opencode-card] Failed to request history:", err);
       this._historyLoading = false;
@@ -762,125 +736,46 @@ class OpenCodeCard extends HTMLElement {
   }
 
   private async _fetchHistorySince(since: string) {
-    if (!this._hass || !this._historyCommandTopic || !this._historyResponseTopic || !this._historyDeviceId) return;
+    if (!this._hass || !this._historySessionId) return;
 
-    const requestId = `req_${Date.now()}`;
-
-    // Subscribe to response topic
-    await this._subscribeToResponse(requestId);
-
-    // Send get_history_since command
     try {
-      await this._hass.callService("mqtt", "publish", {
-        topic: this._historyCommandTopic,
-        payload: JSON.stringify({
-          command: "get_history_since",
-          since,
-          request_id: requestId,
-        }),
+      await this._hass.callService("opencode", "get_history", {
+        session_id: this._historySessionId,
+        since,
+        request_id: `req_${Date.now()}`,
       });
     } catch (err) {
       console.error("[opencode-card] Failed to request history update:", err);
     }
   }
 
-  private async _subscribeToResponse(requestId: string) {
-    if (!this._hass || !this._historyResponseTopic) return;
-
-    // Use subscribe_trigger with MQTT trigger for proper MQTT subscription
-    try {
-      const unsubscribe = await this._hass.connection.subscribeMessage(
-        (event: unknown) => {
-          // The event from subscribe_trigger contains trigger variables
-          const triggerEvent = event as { 
-            variables?: { 
-              trigger?: { 
-                topic?: string; 
-                payload?: string;
-                payload_json?: Record<string, unknown>;
-              } 
-            } 
-          };
-          
-          const trigger = triggerEvent.variables?.trigger;
-          if (trigger?.topic === this._historyResponseTopic) {
-            try {
-              // Use payload_json if available, otherwise parse payload
-              const response = (trigger.payload_json || JSON.parse(trigger.payload || "{}")) as HistoryResponse;
-              if (response.type === "history" && (!response.request_id || response.request_id === requestId)) {
-                this._handleHistoryResponse(response);
-              }
-            } catch (err) {
-              console.error("[opencode-card] Failed to parse history response:", err);
-            }
-          }
-        },
-        {
-          type: "subscribe_trigger",
-          trigger: {
-            platform: "mqtt",
-            topic: this._historyResponseTopic,
-          },
-        }
-      );
-
-      // Store unsubscribe function
-      this._mqttUnsubscribe = unsubscribe;
-
-      // Auto-unsubscribe after 30 seconds (timeout)
-      setTimeout(() => {
-        if (this._mqttUnsubscribe) {
-          this._mqttUnsubscribe();
-          this._mqttUnsubscribe = null;
-        }
-        if (this._historyLoading) {
-          this._historyLoading = false;
-          this._render();
-        }
-      }, 30000);
-    } catch (err) {
-      console.error("[opencode-card] Failed to subscribe to response topic:", err);
-    }
-  }
-
   private _handleHistoryResponse(response: HistoryResponse) {
-    if (!this._historyDeviceId) return;
+    if (!this._historySessionId) return;
 
     const hadNewMessages = response.since && response.messages.length > 0;
     const isInitialLoad = !this._historyData;
 
-    // If this is a "since" response, merge with existing data
     if (response.since && this._historyData) {
-      // Append new messages to existing data
       const existingIds = new Set(this._historyData.messages.map(m => m.id));
       const newMessages = response.messages.filter(m => !existingIds.has(m.id));
       this._historyData.messages.push(...newMessages);
       this._historyData.fetched_at = response.fetched_at;
     } else {
-      // Full history replacement
       this._historyData = response;
     }
 
-    // Save to cache
-    this._saveHistoryToCache(this._historyDeviceId, this._historyData);
+    this._saveHistoryToCache(this._historySessionId, this._historyData);
 
     this._historyLoading = false;
     this._render();
 
-    // Auto-scroll to bottom on initial load or when new messages arrive (if already at bottom)
     if (isInitialLoad || (hadNewMessages && this._isAtBottom)) {
       setTimeout(() => this._scrollToBottom(), 0);
-    }
-
-    // Unsubscribe
-    if (this._mqttUnsubscribe) {
-      this._mqttUnsubscribe();
-      this._mqttUnsubscribe = null;
     }
   }
 
   private _refreshHistory() {
-    if (!this._historyDeviceId || !this._historyData) return;
+    if (!this._historySessionId || !this._historyData) return;
     this._historyLoading = true;
     this._render();
     this._fetchHistorySince(this._historyData.fetched_at);
@@ -889,26 +784,18 @@ class OpenCodeCard extends HTMLElement {
   private async _respondToPermission(response: "once" | "always" | "reject") {
     if (!this._hass || !this._activePermission) return;
 
-    const { commandTopic, permission_id } = this._activePermission;
+    const { permission_id, session_id } = this._activePermission;
 
-    // Validate we have required fields before sending
-    if (!commandTopic) {
-      console.error("[opencode-card] Cannot respond: missing command topic");
-      return;
-    }
     if (!permission_id) {
-      console.error("[opencode-card] Cannot respond: missing permission_id (still loading)");
+      console.error("[opencode-card] Cannot respond: missing permission_id");
       return;
     }
 
     try {
-      await this._hass.callService("mqtt", "publish", {
-        topic: commandTopic,
-        payload: JSON.stringify({
-          command: "permission_response",
-          permission_id,
-          response,
-        }),
+      await this._hass.callService("opencode", "respond_permission", {
+        session_id,
+        permission_id,
+        response,
       });
       
       this._hidePermissionModal();
@@ -924,7 +811,6 @@ class OpenCodeCard extends HTMLElement {
 
     let content = "";
 
-    // If a device is pinned (via config), show only that device in detailed view (no back button)
     if (pinnedDevice) {
       content = `
         <ha-card>
@@ -934,7 +820,6 @@ class OpenCodeCard extends HTMLElement {
         </ha-card>
       `;
     } else if (selectedDevice) {
-      // If a device is selected (via click), show detail view with back button
       content = `
         <ha-card>
           <div class="card-content pinned">
@@ -943,11 +828,17 @@ class OpenCodeCard extends HTMLElement {
         </ha-card>
       `;
     } else {
-      // Otherwise show all devices in list view
+      const sortIcon = this._sortMode === "activity" ? "mdi:sort-clock-descending" : "mdi:sort-alphabetical-ascending";
+      const sortTitle = this._sortMode === "activity" ? "Sorted by latest activity" : "Sorted by name";
       content = `
         <ha-card>
           <div class="card-header">
             <div class="name">${title}</div>
+            ${this._devices.size > 1 ? `
+              <button class="sort-toggle" title="${sortTitle}">
+                <ha-icon icon="${sortIcon}"></ha-icon>
+              </button>
+            ` : ""}
           </div>
           <div class="card-content">
             ${this._devices.size === 0 ? this._renderEmpty() : this._renderDevices()}
@@ -956,12 +847,10 @@ class OpenCodeCard extends HTMLElement {
       `;
     }
 
-    // Add modal if showing permission
     if (this._showPermissionModal && this._activePermission) {
       content += this._renderPermissionModal(this._activePermission);
     }
 
-    // Add chat/history view if showing
     if (this._showHistoryView) {
       content += this._renderHistoryView();
     }
@@ -973,16 +862,13 @@ class OpenCodeCard extends HTMLElement {
       </style>
     `;
 
-    // Attach event listeners after render
     this._attachEventListeners();
   }
 
   private _attachEventListeners() {
-    // Device card click handlers (only in list view, not pinned)
     if (!this._isPinned() && !this._selectedDeviceId) {
       this.querySelectorAll(".device-card[data-device-id]").forEach((el) => {
         el.addEventListener("click", (e) => {
-          // Don't navigate if clicking on permission alert
           if ((e.target as HTMLElement).closest(".permission-alert")) {
             return;
           }
@@ -994,12 +880,15 @@ class OpenCodeCard extends HTMLElement {
       });
     }
 
-    // Back button handler
     this.querySelector(".back-button")?.addEventListener("click", () => {
       this._goBack();
     });
 
-    // Permission alert click handlers
+    this.querySelector(".sort-toggle")?.addEventListener("click", () => {
+      this._sortMode = this._sortMode === "activity" ? "name" : "activity";
+      this._render();
+    });
+
     this.querySelectorAll(".permission-alert[data-device-id]").forEach((el) => {
       el.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -1011,27 +900,18 @@ class OpenCodeCard extends HTMLElement {
             if (permission) {
               this._showPermission(permission);
             } else {
-              // Fallback: show modal with loading state even without permission details
-              // This can happen if the fallback alert is rendered but tracking hasn't caught up
-              const deviceIdEntity = device.entities.get("device_id");
-              const commandTopic = (deviceIdEntity?.attributes?.command_topic as string) ?? "";
-              if (commandTopic) {
-                this._showPermission({
-                  permission_id: "",
-                  type: "pending",
-                  title: "Permission Required",
-                  session_id: "",
-                  message_id: "",
-                  commandTopic,
-                });
-              }
+              this._showPermission({
+                permission_id: "",
+                type: "pending",
+                title: "Permission Required",
+                session_id: device.sessionId,
+              });
             }
           }
         }
       });
     });
 
-    // Permission modal close button (exclude prompt and history modals)
     this.querySelector(".modal-backdrop:not(.history-modal-backdrop)")?.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).classList.contains("modal-backdrop")) {
         this._hidePermissionModal();
@@ -1042,7 +922,6 @@ class OpenCodeCard extends HTMLElement {
       this._hidePermissionModal();
     });
 
-    // Permission response buttons
     this.querySelector(".btn-allow-once")?.addEventListener("click", () => {
       this._respondToPermission("once");
     });
@@ -1055,20 +934,15 @@ class OpenCodeCard extends HTMLElement {
       this._respondToPermission("reject");
     });
 
-    // Open chat button in detail view
     this.querySelector(".open-chat-btn")?.addEventListener("click", () => {
       const btn = this.querySelector(".open-chat-btn") as HTMLElement;
       const deviceId = btn?.dataset.deviceId;
-      const commandTopic = btn?.dataset.commandTopic;
-      const responseTopic = btn?.dataset.responseTopic;
-      if (deviceId && commandTopic && responseTopic) {
-        this._showHistory(deviceId, commandTopic, responseTopic);
+      const sessionId = btn?.dataset.sessionId;
+      if (deviceId && sessionId) {
+        this._showHistory(deviceId, sessionId);
       }
     });
 
-
-
-    // History modal handlers
     this.querySelector(".history-modal-backdrop")?.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).classList.contains("history-modal-backdrop")) {
         this._hideHistoryView();
@@ -1083,16 +957,13 @@ class OpenCodeCard extends HTMLElement {
       this._refreshHistory();
     });
 
-    // Load more history on click
     this.querySelector(".history-load-more")?.addEventListener("click", () => {
       this._loadMoreHistory();
     });
 
-    // Load more history on scroll to top + track scroll position
     const historyBody = this.querySelector(".history-body");
     if (historyBody) {
       historyBody.addEventListener("scroll", () => {
-        // If scrolled near top (within 50px), load more
         if (historyBody.scrollTop < 50 && !this._historyLoadingMore) {
           const totalMessages = this._historyData?.messages.length || 0;
           const startIndex = Math.max(0, totalMessages - this._historyVisibleCount);
@@ -1101,11 +972,9 @@ class OpenCodeCard extends HTMLElement {
           }
         }
         
-        // Track if user is at bottom (within 50px)
         const isAtBottom = historyBody.scrollHeight - historyBody.scrollTop - historyBody.clientHeight < 50;
         if (isAtBottom !== this._isAtBottom) {
           this._isAtBottom = isAtBottom;
-          // Update button visibility without full re-render
           const scrollBtn = this.querySelector(".scroll-to-bottom-btn");
           if (scrollBtn) {
             scrollBtn.classList.toggle("hidden", isAtBottom);
@@ -1114,12 +983,10 @@ class OpenCodeCard extends HTMLElement {
       });
     }
 
-    // Scroll to bottom button
     this.querySelector(".scroll-to-bottom-btn")?.addEventListener("click", () => {
       this._scrollToBottom();
     });
 
-    // Chat input handlers
     this.querySelector(".chat-send-btn")?.addEventListener("click", () => {
       const textarea = this.querySelector(".chat-input") as HTMLTextAreaElement;
       if (textarea?.value.trim()) {
@@ -1128,7 +995,6 @@ class OpenCodeCard extends HTMLElement {
       }
     });
 
-    // Allow Enter to send (Shift+Enter for newline)
     this.querySelector(".chat-input")?.addEventListener("keydown", (e) => {
       const keyEvent = e as KeyboardEvent;
       if (keyEvent.key === "Enter" && !keyEvent.shiftKey) {
@@ -1141,15 +1007,13 @@ class OpenCodeCard extends HTMLElement {
       }
     });
     
-    // Agent selector
     this.querySelector(".agent-selector")?.addEventListener("change", (e) => {
       const select = e.target as HTMLSelectElement;
       this._selectedAgent = select.value || null;
     });
     
-    // Inline permission response buttons
     this.querySelectorAll(".inline-perm-btn").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
+      btn.addEventListener("click", () => {
         const response = (btn as HTMLElement).dataset.response as "once" | "always" | "reject";
         if (response) {
           this._respondToInlinePermission(response);
@@ -1162,29 +1026,52 @@ class OpenCodeCard extends HTMLElement {
     if (!this._hass || !this._historyDeviceId) return;
     
     const permission = this._pendingPermissions.get(this._historyDeviceId);
-    if (!permission?.permission_id || !permission?.commandTopic) {
+    if (!permission?.permission_id) {
       console.error("[opencode-card] Cannot respond: missing permission details");
       return;
     }
     
     try {
-      await this._hass.callService("mqtt", "publish", {
-        topic: permission.commandTopic,
-        payload: JSON.stringify({
-          command: "permission_response",
-          permission_id: permission.permission_id,
-          response,
-        }),
+      await this._hass.callService("opencode", "respond_permission", {
+        session_id: permission.session_id,
+        permission_id: permission.permission_id,
+        response,
       });
       
-      // Clear the pending permission for this device
       this._pendingPermissions.delete(this._historyDeviceId);
-      
-      // Refresh history to show the result
       setTimeout(() => this._refreshHistory(), 500);
     } catch (err) {
       console.error("[opencode-card] Failed to respond to permission:", err);
     }
+  }
+
+  private _loadMoreHistory() {
+    if (!this._historyData || this._historyLoadingMore) return;
+    
+    const totalMessages = this._historyData.messages.length;
+    const currentStart = Math.max(0, totalMessages - this._historyVisibleCount);
+    
+    if (currentStart <= 0) return;
+    
+    this._historyLoadingMore = true;
+    this._render();
+    
+    setTimeout(() => {
+      this._historyVisibleCount += OpenCodeCard.HISTORY_PAGE_SIZE;
+      this._historyLoadingMore = false;
+      
+      const historyBody = this.querySelector(".history-body");
+      const previousScrollHeight = historyBody?.scrollHeight || 0;
+      
+      this._render();
+      
+      const newHistoryBody = this.querySelector(".history-body");
+      if (newHistoryBody && previousScrollHeight > 0) {
+        const newScrollHeight = newHistoryBody.scrollHeight;
+        const scrollDiff = newScrollHeight - previousScrollHeight;
+        newHistoryBody.scrollTop = scrollDiff;
+      }
+    }, 100);
   }
 
   private _renderPermissionModal(permission: PermissionDetails): string {
@@ -1258,7 +1145,6 @@ class OpenCodeCard extends HTMLElement {
       ? new Date(this._historyData.fetched_at).toLocaleString() 
       : "";
     
-    // Get current device state for status indicator
     const device = this._historyDeviceId ? this._devices.get(this._historyDeviceId) : null;
     const stateEntity = device?.entities.get("state");
     const currentState = stateEntity?.state ?? "unknown";
@@ -1314,7 +1200,6 @@ class OpenCodeCard extends HTMLElement {
       return "";
     }
     
-    // Filter to only show primary or all mode agents (not subagent-only)
     const selectableAgents = this._availableAgents.filter(a => a.mode === "primary" || a.mode === "all");
     
     if (selectableAgents.length === 0) {
@@ -1361,7 +1246,6 @@ class OpenCodeCard extends HTMLElement {
 
     let html = "";
 
-    // Show "load more" indicator at top if there are older messages
     if (hasMore) {
       const remainingCount = startIndex;
       html += `
@@ -1373,8 +1257,6 @@ class OpenCodeCard extends HTMLElement {
     }
 
     html += visibleMessages.map(msg => this._renderHistoryMessage(msg)).join("");
-    
-    // Add permission card if waiting for permission
     html += this._renderInlinePermission();
 
     return html;
@@ -1391,7 +1273,6 @@ class OpenCodeCard extends HTMLElement {
     
     if (currentState !== "waiting_permission") return "";
     
-    // Get permission details from tracked permissions
     const permission = this._pendingPermissions.get(this._historyDeviceId);
     const hasFullDetails = permission?.permission_id;
     
@@ -1447,43 +1328,10 @@ class OpenCodeCard extends HTMLElement {
     `;
   }
 
-  private _loadMoreHistory() {
-    if (!this._historyData || this._historyLoadingMore) return;
-    
-    const totalMessages = this._historyData.messages.length;
-    const currentStart = Math.max(0, totalMessages - this._historyVisibleCount);
-    
-    if (currentStart <= 0) return; // Already showing all messages
-    
-    this._historyLoadingMore = true;
-    this._render();
-    
-    // Small delay to show loading state, then load more
-    setTimeout(() => {
-      this._historyVisibleCount += OpenCodeCard.HISTORY_PAGE_SIZE;
-      this._historyLoadingMore = false;
-      
-      // Re-render but maintain scroll position near top
-      const historyBody = this.querySelector(".history-body");
-      const previousScrollHeight = historyBody?.scrollHeight || 0;
-      
-      this._render();
-      
-      // Adjust scroll to keep user at roughly same position
-      const newHistoryBody = this.querySelector(".history-body");
-      if (newHistoryBody && previousScrollHeight > 0) {
-        const newScrollHeight = newHistoryBody.scrollHeight;
-        const scrollDiff = newScrollHeight - previousScrollHeight;
-        newHistoryBody.scrollTop = scrollDiff;
-      }
-    }, 100);
-  }
-
   private _renderHistoryMessage(msg: HistoryMessage): string {
     const isUser = msg.role === "user";
     const timeInfo = formatRelativeTime(msg.timestamp);
     
-    // Render parts
     const partsHtml = msg.parts.map(part => {
       if (part.type === "text" && part.content) {
         return `<div class="history-text">${this._escapeHtml(part.content)}</div>`;
@@ -1510,7 +1358,6 @@ class OpenCodeCard extends HTMLElement {
       return "";
     }).join("");
 
-    // Metadata for assistant messages
     let metaHtml = "";
     if (!isUser && (msg.model || msg.tokens_input || msg.cost)) {
       const metaParts: string[] = [];
@@ -1553,13 +1400,26 @@ class OpenCodeCard extends HTMLElement {
   }
 
   private _renderDevices(): string {
-    const deviceHtml: string[] = [];
-
-    for (const [, device] of this._devices) {
-      deviceHtml.push(this._renderDevice(device));
+    let devices = Array.from(this._devices.values());
+    
+    if (this._sortMode === "activity") {
+      devices.sort((a, b) => {
+        const aActivity = a.entities.get("last_activity")?.state ?? "";
+        const bActivity = b.entities.get("last_activity")?.state ?? "";
+        if (!aActivity && !bActivity) return 0;
+        if (!aActivity) return 1;
+        if (!bActivity) return -1;
+        return new Date(bActivity).getTime() - new Date(aActivity).getTime();
+      });
+    } else {
+      devices.sort((a, b) => {
+        const aName = a.deviceName.replace("OpenCode - ", "").toLowerCase();
+        const bName = b.deviceName.replace("OpenCode - ", "").toLowerCase();
+        return aName.localeCompare(bName);
+      });
     }
 
-    return deviceHtml.join("");
+    return devices.map(device => this._renderDevice(device)).join("");
   }
 
   private _renderDetailView(device: OpenCodeDevice, showBackButton: boolean): string {
@@ -1567,7 +1427,6 @@ class OpenCodeCard extends HTMLElement {
     const sessionEntity = device.entities.get("session_title");
     const modelEntity = device.entities.get("model");
     const toolEntity = device.entities.get("current_tool");
-    const deviceIdEntity = device.entities.get("device_id");
     const costEntity = device.entities.get("cost");
     const tokensInputEntity = device.entities.get("tokens_input");
     const tokensOutputEntity = device.entities.get("tokens_output");
@@ -1578,26 +1437,21 @@ class OpenCodeCard extends HTMLElement {
     const sessionTitle = sessionEntity?.state ?? "Unknown Session";
     const model = modelEntity?.state ?? "unknown";
     const currentTool = toolEntity?.state ?? "none";
-    const commandTopic = (deviceIdEntity?.attributes?.command_topic as string) ?? "unknown";
-    const responseTopic = (deviceIdEntity?.attributes?.response_topic as string) ?? "";
     const cost = costEntity?.state ?? "0";
     const tokensIn = tokensInputEntity?.state ?? "0";
     const tokensOut = tokensOutputEntity?.state ?? "0";
     const lastActivity = lastActivityEntity?.state ?? "";
     
-    // Agent info from state entity attributes
     const agent = (stateEntity?.attributes?.agent as string) || null;
     const currentAgent = (stateEntity?.attributes?.current_agent as string) || null;
     const hostname = (stateEntity?.attributes?.hostname as string) || null;
 
-    // Format last activity
     let activityDisplay = "";
     if (lastActivity) {
       const date = new Date(lastActivity);
       activityDisplay = date.toLocaleTimeString();
     }
 
-    // Permission alert - now clickable (uses tracked permissions for reliability)
     const permission = this._getPermissionDetails(device);
     let permissionHtml = "";
     if (permission) {
@@ -1613,7 +1467,6 @@ class OpenCodeCard extends HTMLElement {
         </div>
       `;
     } else if (state === "waiting_permission") {
-      // Fallback: show clickable alert even without full details
       permissionHtml = `
         <div class="permission-alert pinned clickable" data-device-id="${device.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
@@ -1700,14 +1553,14 @@ class OpenCodeCard extends HTMLElement {
         </div>
 
         <div class="detail-actions">
-          <button class="open-chat-btn" data-device-id="${device.deviceId}" data-command-topic="${commandTopic}" data-response-topic="${responseTopic}">
+          <button class="open-chat-btn" data-device-id="${device.deviceId}" data-session-id="${device.sessionId}">
             <ha-icon icon="mdi:chat"></ha-icon>
             <span>Chat</span>
           </button>
         </div>
 
         <div class="detail-footer">
-          <code class="command-topic">${commandTopic}</code>
+          <code class="session-id">${device.sessionId}</code>
         </div>
       </div>
     `;
@@ -1718,7 +1571,6 @@ class OpenCodeCard extends HTMLElement {
     const sessionEntity = device.entities.get("session_title");
     const modelEntity = device.entities.get("model");
     const toolEntity = device.entities.get("current_tool");
-    const deviceIdEntity = device.entities.get("device_id");
     const costEntity = device.entities.get("cost");
     const tokensInputEntity = device.entities.get("tokens_input");
     const tokensOutputEntity = device.entities.get("tokens_output");
@@ -1729,19 +1581,14 @@ class OpenCodeCard extends HTMLElement {
     const sessionTitle = sessionEntity?.state ?? "Unknown Session";
     const model = modelEntity?.state ?? "unknown";
     const currentTool = toolEntity?.state ?? "none";
-    const commandTopic = (deviceIdEntity?.attributes?.command_topic as string) ?? "unknown";
     const cost = costEntity?.state ?? "0";
     const tokensIn = tokensInputEntity?.state ?? "0";
     const tokensOut = tokensOutputEntity?.state ?? "0";
     const lastActivity = lastActivityEntity?.state ?? "";
     
-    // Format last activity time
     const activityTime = lastActivity ? formatRelativeTime(lastActivity) : null;
-    
-    // Agent info from state entity attributes
     const currentAgent = (stateEntity?.attributes?.current_agent as string) || null;
 
-    // Permission alert - now clickable (uses tracked permissions for reliability)
     const permission = this._getPermissionDetails(device);
     let permissionHtml = "";
     if (permission) {
@@ -1757,7 +1604,6 @@ class OpenCodeCard extends HTMLElement {
         </div>
       `;
     } else if (state === "waiting_permission") {
-      // Fallback: show clickable alert even without full details
       permissionHtml = `
         <div class="permission-alert clickable" data-device-id="${device.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
@@ -1832,10 +1678,29 @@ class OpenCodeCard extends HTMLElement {
       }
       .card-header {
         padding: 16px 16px 0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
       }
       .card-header .name {
         font-size: 1.2em;
         font-weight: 500;
+      }
+      .sort-toggle {
+        background: none;
+        border: none;
+        padding: 8px;
+        cursor: pointer;
+        border-radius: 50%;
+        color: var(--secondary-text-color);
+        transition: background 0.2s, color 0.2s;
+      }
+      .sort-toggle:hover {
+        background: var(--secondary-background-color);
+        color: var(--primary-text-color);
+      }
+      .sort-toggle ha-icon {
+        --mdc-icon-size: 20px;
       }
       .card-content {
         padding: 16px;
@@ -1855,7 +1720,6 @@ class OpenCodeCard extends HTMLElement {
         margin-bottom: 16px;
       }
 
-      /* Pulse animation for working state */
       @keyframes pulse {
         0%, 100% { opacity: 1; }
         50% { opacity: 0.6; }
@@ -1867,7 +1731,14 @@ class OpenCodeCard extends HTMLElement {
         animation: pulse 1s ease-in-out infinite;
       }
 
-      /* List view styles */
+      @keyframes spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+      .spinning {
+        animation: spin 1s linear infinite;
+      }
+
       .device-card {
         background: var(--card-background-color);
         border: 1px solid var(--divider-color);
@@ -1949,10 +1820,8 @@ class OpenCodeCard extends HTMLElement {
       }
       .info-label {
         color: var(--secondary-text-color);
-        min-width: 60px;
       }
       .info-value {
-        color: var(--primary-text-color);
         flex: 1;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -1962,30 +1831,53 @@ class OpenCodeCard extends HTMLElement {
         font-family: monospace;
         font-size: 0.85em;
       }
-      .info-value.tool {
-        font-family: monospace;
-        color: var(--info-color, #2196f3);
-      }
-      .info-value.sub-agent {
-        font-weight: 500;
-        color: var(--accent-color, #673ab7);
-      }
       .info-row.stats {
         margin-top: 4px;
-        gap: 12px;
+        padding-top: 8px;
+        border-top: 1px solid var(--divider-color);
       }
       .stat-value {
         font-family: monospace;
         font-size: 0.85em;
-        color: var(--secondary-text-color);
-      }
-      .device-footer {
-        margin-top: 12px;
-        padding-top: 12px;
-        border-top: 1px solid var(--divider-color);
+        margin-right: 12px;
       }
 
-      /* Detail view styles */
+      .permission-alert {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 12px;
+        padding: 12px;
+        background: #ff980020;
+        border: 1px solid #ff9800;
+        border-radius: 8px;
+      }
+      .permission-alert.clickable {
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+      .permission-alert.clickable:hover {
+        background: #ff980030;
+      }
+      .permission-alert > ha-icon:first-child {
+        --mdc-icon-size: 24px;
+        color: #ff9800;
+      }
+      .permission-details {
+        flex: 1;
+      }
+      .permission-title {
+        font-weight: 500;
+      }
+      .permission-type {
+        font-size: 0.85em;
+        color: var(--secondary-text-color);
+      }
+      .permission-chevron {
+        --mdc-icon-size: 20px;
+        color: var(--secondary-text-color);
+      }
+
       .detail-view {
         padding: 16px;
       }
@@ -1993,72 +1885,67 @@ class OpenCodeCard extends HTMLElement {
         display: flex;
         align-items: center;
         gap: 8px;
+        background: none;
+        border: none;
         padding: 8px 12px;
         margin-bottom: 16px;
-        background: var(--secondary-background-color);
-        border: none;
-        border-radius: 8px;
         cursor: pointer;
-        color: var(--primary-text-color);
+        color: var(--primary-color);
         font-size: 0.9em;
+        border-radius: 8px;
         transition: background 0.2s;
       }
       .back-button:hover {
-        background: var(--divider-color);
+        background: var(--secondary-background-color);
       }
       .back-button ha-icon {
-        --mdc-icon-size: 18px;
-        color: var(--secondary-text-color);
+        --mdc-icon-size: 20px;
       }
       .detail-header {
         display: flex;
-        justify-content: space-between;
         align-items: center;
+        gap: 16px;
         margin-bottom: 16px;
       }
       .detail-status {
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 8px 16px;
-        border-radius: 24px;
+        padding: 8px 12px;
+        border-radius: 8px;
         border: 1px solid;
       }
       .detail-status ha-icon {
-        --mdc-icon-size: 20px;
+        --mdc-icon-size: 24px;
       }
       .status-text {
-        font-weight: 600;
+        font-weight: 500;
         text-transform: uppercase;
-        font-size: 0.8em;
-        letter-spacing: 0.5px;
+        font-size: 0.85em;
       }
       .detail-project-info {
-        display: flex;
-        flex-direction: column;
-        align-items: flex-end;
-        gap: 2px;
+        flex: 1;
       }
       .detail-project {
-        font-weight: 500;
         font-size: 1.1em;
-        color: var(--primary-text-color);
+        font-weight: 500;
       }
       .detail-hostname {
         display: flex;
         align-items: center;
         gap: 4px;
-        font-size: 0.75em;
+        font-size: 0.85em;
         color: var(--secondary-text-color);
+        margin-top: 4px;
       }
       .detail-hostname ha-icon {
-        --mdc-icon-size: 12px;
+        --mdc-icon-size: 14px;
       }
       .detail-session {
         display: flex;
         align-items: center;
-        gap: 12px;
-        padding: 12px 16px;
+        gap: 8px;
+        padding: 12px;
         background: var(--secondary-background-color);
         border-radius: 8px;
         margin-bottom: 16px;
@@ -2069,71 +1956,57 @@ class OpenCodeCard extends HTMLElement {
       }
       .session-title {
         font-size: 1em;
-        color: var(--primary-text-color);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
       }
       .detail-info {
         display: flex;
         flex-direction: column;
-        gap: 8px;
+        gap: 12px;
         margin-bottom: 16px;
       }
       .detail-row {
         display: flex;
         align-items: center;
         gap: 12px;
-        padding: 8px 0;
       }
       .detail-row ha-icon {
-        --mdc-icon-size: 18px;
+        --mdc-icon-size: 20px;
         color: var(--secondary-text-color);
       }
       .detail-label {
+        width: 100px;
         color: var(--secondary-text-color);
-        min-width: 100px;
-        font-size: 0.9em;
       }
       .detail-value {
         flex: 1;
-        color: var(--primary-text-color);
       }
       .detail-value.mono {
         font-family: monospace;
         font-size: 0.9em;
       }
-      .detail-value.tool-active {
-        color: var(--info-color, #2196f3);
+      .detail-row.highlight {
+        padding: 8px 12px;
+        background: var(--primary-color)10;
+        border-radius: 8px;
+        margin: -4px -12px;
+      }
+      .tool-active {
+        color: var(--primary-color);
         font-weight: 500;
       }
-      .detail-value.agent-badge {
+      .agent-badge {
         display: flex;
         align-items: center;
         gap: 4px;
-        font-weight: 500;
-        color: var(--primary-text-color);
       }
       .sub-agent-indicator {
-        display: inline-flex;
+        display: flex;
         align-items: center;
-        gap: 4px;
-        padding: 2px 8px;
-        background: var(--accent-color, #673ab7);
-        color: white;
-        border-radius: 12px;
-        font-size: 0.85em;
-        font-weight: 500;
+        gap: 2px;
+        color: var(--secondary-text-color);
+        font-size: 0.9em;
       }
       .sub-agent-indicator ha-icon {
         --mdc-icon-size: 14px;
-      }
-      .detail-row.highlight {
-        background: var(--info-color, #2196f3);
-        background: rgba(33, 150, 243, 0.1);
-        margin: 0 -16px;
-        padding: 8px 16px;
-        border-radius: 8px;
       }
       .detail-stats {
         display: flex;
@@ -2156,7 +2029,7 @@ class OpenCodeCard extends HTMLElement {
       .stat .stat-value {
         font-size: 1.1em;
         font-weight: 500;
-        color: var(--primary-text-color);
+        font-family: monospace;
       }
       .stat .stat-label {
         font-size: 0.75em;
@@ -2165,113 +2038,78 @@ class OpenCodeCard extends HTMLElement {
       }
       .detail-actions {
         display: flex;
-        gap: 8px;
+        gap: 12px;
         margin-bottom: 16px;
       }
-      .detail-footer {
-        padding-top: 12px;
-        border-top: 1px solid var(--divider-color);
-      }
-
-      /* Permission alert styles */
-      .permission-alert {
+      .open-chat-btn {
+        flex: 1;
         display: flex;
         align-items: center;
-        gap: 12px;
-        margin-top: 12px;
+        justify-content: center;
+        gap: 8px;
         padding: 12px;
-        background: rgba(255, 152, 0, 0.15);
-        border: 1px solid var(--warning-color, #ff9800);
+        background: var(--primary-color);
+        color: var(--text-primary-color, #fff);
+        border: none;
         border-radius: 8px;
-      }
-      .permission-alert.clickable {
         cursor: pointer;
-        transition: background 0.2s, transform 0.1s;
+        font-size: 1em;
+        transition: opacity 0.2s;
       }
-      .permission-alert.clickable:hover {
-        background: rgba(255, 152, 0, 0.25);
+      .open-chat-btn:hover {
+        opacity: 0.9;
       }
-      .permission-alert.clickable:active {
-        transform: scale(0.98);
-      }
-      .permission-alert.pinned {
-        margin: 0 0 16px 0;
-        padding: 16px;
-      }
-      .permission-alert ha-icon {
-        --mdc-icon-size: 24px;
-        color: var(--warning-color, #ff9800);
-      }
-      .permission-details {
-        flex: 1;
-      }
-      .permission-title {
-        font-weight: 500;
-        color: var(--primary-text-color);
-      }
-      .permission-type {
-        font-size: 0.85em;
-        color: var(--secondary-text-color);
-      }
-      .permission-chevron {
+      .open-chat-btn ha-icon {
         --mdc-icon-size: 20px;
-        color: var(--secondary-text-color);
       }
-
-      .command-topic {
-        display: block;
+      .detail-footer {
+        text-align: center;
+      }
+      .session-id {
         font-size: 0.75em;
         color: var(--secondary-text-color);
         background: var(--secondary-background-color);
         padding: 4px 8px;
         border-radius: 4px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
       }
 
-      /* Modal styles */
       .modal-backdrop {
         position: fixed;
         top: 0;
         left: 0;
         right: 0;
         bottom: 0;
-        background: rgba(0, 0, 0, 0.6);
+        background: rgba(0, 0, 0, 0.5);
         display: flex;
         align-items: center;
         justify-content: center;
-        z-index: 999;
-        padding: 16px;
+        z-index: 1000;
       }
       .modal {
         background: var(--card-background-color);
-        border-radius: 16px;
-        max-width: 480px;
-        width: 100%;
+        border-radius: 12px;
+        max-width: 500px;
+        width: 90%;
         max-height: 80vh;
         overflow: hidden;
         display: flex;
         flex-direction: column;
-        box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
       }
       .modal-header {
         display: flex;
         align-items: center;
         gap: 12px;
-        padding: 16px 20px;
+        padding: 16px;
         border-bottom: 1px solid var(--divider-color);
-        background: rgba(255, 152, 0, 0.1);
       }
-      .modal-header ha-icon {
-        --mdc-icon-size: 28px;
-        color: var(--warning-color, #ff9800);
+      .modal-header ha-icon:first-child {
+        --mdc-icon-size: 24px;
+        color: #ff9800;
       }
       .modal-title {
         flex: 1;
-        font-size: 1.2em;
-        font-weight: 600;
-        color: var(--primary-text-color);
+        font-size: 1.1em;
+        font-weight: 500;
       }
       .modal-close {
         background: none;
@@ -2279,59 +2117,44 @@ class OpenCodeCard extends HTMLElement {
         padding: 8px;
         cursor: pointer;
         border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        color: var(--secondary-text-color);
+        transition: background 0.2s;
       }
       .modal-close:hover {
         background: var(--secondary-background-color);
       }
       .modal-close ha-icon {
         --mdc-icon-size: 20px;
-        color: var(--secondary-text-color);
       }
       .modal-body {
-        padding: 20px;
+        padding: 16px;
         overflow-y: auto;
+        flex: 1;
       }
       .permission-info {
-        margin-bottom: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 16px;
       }
       .permission-main-title {
         font-size: 1.1em;
         font-weight: 500;
-        color: var(--primary-text-color);
-        margin-bottom: 8px;
       }
       .permission-type-badge {
         display: inline-block;
-        padding: 4px 12px;
-        background: var(--warning-color, #ff9800);
-        color: white;
-        border-radius: 12px;
-        font-size: 0.8em;
-        font-weight: 500;
-        text-transform: uppercase;
+        padding: 4px 8px;
+        background: var(--secondary-background-color);
+        border-radius: 4px;
+        font-size: 0.85em;
+        color: var(--secondary-text-color);
+        align-self: flex-start;
       }
       .permission-section {
         margin-bottom: 16px;
       }
-      .permission-loading {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 16px;
-        background: rgba(255, 152, 0, 0.1);
-        border-radius: 8px;
-        color: var(--secondary-text-color);
-      }
-      .permission-loading ha-icon {
-        --mdc-icon-size: 20px;
-        color: var(--warning-color, #ff9800);
-      }
       .section-label {
         font-size: 0.85em;
-        font-weight: 500;
         color: var(--secondary-text-color);
         margin-bottom: 8px;
         text-transform: uppercase;
@@ -2340,36 +2163,39 @@ class OpenCodeCard extends HTMLElement {
         display: block;
         padding: 12px;
         background: var(--secondary-background-color);
-        border-radius: 8px;
+        border-radius: 4px;
+        font-family: monospace;
         font-size: 0.9em;
         word-break: break-all;
-        color: var(--primary-text-color);
       }
       .metadata-list {
-        background: var(--secondary-background-color);
-        border-radius: 8px;
-        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
       }
       .metadata-item {
         display: flex;
         gap: 8px;
-        padding: 4px 0;
-        font-size: 0.9em;
       }
       .metadata-key {
         color: var(--secondary-text-color);
-        font-weight: 500;
       }
       .metadata-value {
-        color: var(--primary-text-color);
+        font-family: monospace;
+        font-size: 0.9em;
         word-break: break-all;
+      }
+      .permission-loading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--secondary-text-color);
       }
       .modal-actions {
         display: flex;
-        gap: 8px;
-        padding: 16px 20px;
+        gap: 12px;
+        padding: 16px;
         border-top: 1px solid var(--divider-color);
-        background: var(--secondary-background-color);
       }
       .btn {
         flex: 1;
@@ -2377,80 +2203,62 @@ class OpenCodeCard extends HTMLElement {
         align-items: center;
         justify-content: center;
         gap: 8px;
-        padding: 12px 16px;
+        padding: 12px;
         border: none;
         border-radius: 8px;
-        font-size: 0.9em;
-        font-weight: 500;
         cursor: pointer;
-        transition: background 0.2s, transform 0.1s;
-      }
-      .btn:active {
-        transform: scale(0.97);
+        font-size: 0.9em;
+        transition: opacity 0.2s;
       }
       .btn:disabled {
         opacity: 0.5;
         cursor: not-allowed;
-        transform: none;
-      }
-      .btn:disabled:hover {
-        background: inherit;
       }
       .btn ha-icon {
         --mdc-icon-size: 18px;
       }
       .btn-reject {
-        background: var(--error-color, #f44336);
-        color: white;
-      }
-      .btn-reject:hover {
-        background: #d32f2f;
+        background: #f4433620;
+        color: #f44336;
       }
       .btn-allow-once {
-        background: var(--primary-color, #03a9f4);
-        color: white;
-      }
-      .btn-allow-once:hover {
-        background: #0288d1;
+        background: #4caf5020;
+        color: #4caf50;
       }
       .btn-allow-always {
-        background: var(--success-color, #4caf50);
-        color: white;
-      }
-      .btn-allow-always:hover {
-        background: #388e3c;
+        background: #2196f320;
+        color: #2196f3;
       }
 
-      .btn-cancel {
-        background: var(--secondary-background-color);
-        color: var(--primary-text-color);
-      }
-      .btn-cancel:hover {
-        background: var(--divider-color);
-      }
-      .btn-send {
-        background: var(--primary-color, #03a9f4);
-        color: white;
-      }
-      .btn-send:hover {
-        background: #0288d1;
-      }
-
-      /* History modal styles */
       .history-modal {
-        max-width: 600px;
-        max-height: 85vh;
+        max-width: 700px;
+        width: 95%;
+        max-height: 90vh;
+      }
+      .chat-modal {
+        display: flex;
+        flex-direction: column;
       }
       .history-header {
-        background: rgba(103, 58, 183, 0.1);
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px 16px;
       }
-      .history-header ha-icon {
-        color: var(--info-color, #673ab7);
+      .history-header ha-icon:first-child {
+        --mdc-icon-size: 24px;
+        color: var(--primary-color);
       }
       .history-header-actions {
         display: flex;
         align-items: center;
-        gap: 4px;
+        gap: 8px;
+      }
+      .working-indicator {
+        color: var(--primary-color);
+      }
+      .working-indicator ha-icon {
+        --mdc-icon-size: 20px;
       }
       .history-refresh-btn {
         background: none;
@@ -2458,11 +2266,10 @@ class OpenCodeCard extends HTMLElement {
         padding: 8px;
         cursor: pointer;
         border-radius: 50%;
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        color: var(--secondary-text-color);
+        transition: background 0.2s;
       }
-      .history-refresh-btn:hover:not(:disabled) {
+      .history-refresh-btn:hover {
         background: var(--secondary-background-color);
       }
       .history-refresh-btn:disabled {
@@ -2471,29 +2278,6 @@ class OpenCodeCard extends HTMLElement {
       }
       .history-refresh-btn ha-icon {
         --mdc-icon-size: 20px;
-        color: var(--secondary-text-color);
-      }
-      .history-subheader {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        padding: 12px 20px;
-        background: var(--secondary-background-color);
-        border-bottom: 1px solid var(--divider-color);
-        font-size: 0.9em;
-      }
-      .history-title {
-        font-weight: 500;
-        color: var(--primary-text-color);
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        flex: 1;
-      }
-      .history-fetched {
-        color: var(--secondary-text-color);
-        font-size: 0.85em;
-        margin-left: 12px;
       }
       .history-body-container {
         position: relative;
@@ -2501,28 +2285,26 @@ class OpenCodeCard extends HTMLElement {
         min-height: 0;
       }
       .history-body {
-        padding: 16px 20px;
+        height: 400px;
         overflow-y: auto;
-        max-height: calc(85vh - 180px);
-        height: 100%;
+        padding: 16px;
       }
       .scroll-to-bottom-btn {
         position: absolute;
-        bottom: 12px;
+        bottom: 16px;
         right: 24px;
-        width: 36px;
-        height: 36px;
+        background: var(--primary-color);
+        color: var(--text-primary-color, #fff);
         border: none;
         border-radius: 50%;
-        background: var(--primary-color, #03a9f4);
-        color: white;
-        cursor: pointer;
+        width: 40px;
+        height: 40px;
         display: flex;
         align-items: center;
         justify-content: center;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        cursor: pointer;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
         transition: opacity 0.2s, transform 0.2s;
-        z-index: 10;
       }
       .scroll-to-bottom-btn:hover {
         transform: scale(1.1);
@@ -2530,7 +2312,6 @@ class OpenCodeCard extends HTMLElement {
       .scroll-to-bottom-btn.hidden {
         opacity: 0;
         pointer-events: none;
-        transform: translateY(10px);
       }
       .scroll-to-bottom-btn ha-icon {
         --mdc-icon-size: 24px;
@@ -2540,24 +2321,13 @@ class OpenCodeCard extends HTMLElement {
         flex-direction: column;
         align-items: center;
         justify-content: center;
-        padding: 40px;
+        padding: 32px;
         color: var(--secondary-text-color);
         gap: 12px;
       }
       .history-loading ha-icon, .history-empty ha-icon {
-        --mdc-icon-size: 36px;
+        --mdc-icon-size: 32px;
       }
-
-      /* Spinning animation */
-      @keyframes spin {
-        from { transform: rotate(0deg); }
-        to { transform: rotate(360deg); }
-      }
-      .spinning {
-        animation: spin 1s linear infinite;
-      }
-
-      /* Load more history button */
       .history-load-more {
         display: flex;
         align-items: center;
@@ -2566,101 +2336,62 @@ class OpenCodeCard extends HTMLElement {
         padding: 12px;
         margin-bottom: 16px;
         background: var(--secondary-background-color);
-        border: 1px dashed var(--divider-color);
         border-radius: 8px;
         cursor: pointer;
         color: var(--secondary-text-color);
         font-size: 0.9em;
-        transition: background 0.2s, border-color 0.2s;
+        transition: background 0.2s;
       }
       .history-load-more:hover {
         background: var(--divider-color);
-        border-color: var(--primary-color);
-        color: var(--primary-text-color);
       }
       .history-load-more ha-icon {
         --mdc-icon-size: 18px;
       }
-
-      /* History message styles */
       .history-message {
         margin-bottom: 16px;
         padding: 12px;
-        border-radius: 12px;
-        background: var(--secondary-background-color);
-      }
-      .history-message:last-child {
-        margin-bottom: 0;
+        border-radius: 8px;
       }
       .history-message.user {
-        background: rgba(3, 169, 244, 0.1);
-        border: 1px solid rgba(3, 169, 244, 0.2);
+        background: var(--primary-color)10;
+        margin-left: 24px;
       }
       .history-message.assistant {
         background: var(--secondary-background-color);
-        border: 1px solid var(--divider-color);
+        margin-right: 24px;
       }
       .message-header {
         display: flex;
         align-items: center;
         gap: 8px;
         margin-bottom: 8px;
-        padding-bottom: 8px;
-        border-bottom: 1px solid var(--divider-color);
+        font-size: 0.85em;
       }
       .message-header ha-icon {
         --mdc-icon-size: 18px;
-      }
-      .history-message.user .message-header ha-icon {
-        color: var(--primary-color, #03a9f4);
-      }
-      .history-message.assistant .message-header ha-icon {
-        color: var(--success-color, #4caf50);
+        color: var(--secondary-text-color);
       }
       .message-role {
         font-weight: 500;
-        font-size: 0.9em;
-        color: var(--primary-text-color);
       }
       .message-time {
-        margin-left: auto;
-        font-size: 0.8em;
         color: var(--secondary-text-color);
+        margin-left: auto;
       }
       .message-content {
-        color: var(--primary-text-color);
-        font-size: 0.95em;
         line-height: 1.5;
       }
-      .message-meta {
-        margin-top: 8px;
-        padding-top: 8px;
-        border-top: 1px solid var(--divider-color);
-        font-size: 0.75em;
-        color: var(--secondary-text-color);
-        font-family: monospace;
-      }
-
-      /* History text content */
       .history-text {
         white-space: pre-wrap;
         word-break: break-word;
-        margin-bottom: 8px;
       }
-      .history-text:last-child {
-        margin-bottom: 0;
-      }
-
-      /* History tool call styles */
       .history-tool {
         margin: 8px 0;
         padding: 12px;
         background: var(--card-background-color);
-        border-radius: 8px;
         border: 1px solid var(--divider-color);
-      }
-      .history-tool:last-child {
-        margin-bottom: 0;
+        border-radius: 8px;
       }
       .tool-header {
         display: flex;
@@ -2670,284 +2401,182 @@ class OpenCodeCard extends HTMLElement {
       }
       .tool-header ha-icon {
         --mdc-icon-size: 16px;
-        color: var(--info-color, #2196f3);
+        color: var(--secondary-text-color);
       }
       .tool-name {
-        font-weight: 500;
-        font-size: 0.9em;
-        color: var(--info-color, #2196f3);
         font-family: monospace;
+        font-size: 0.9em;
+        font-weight: 500;
       }
       .tool-args {
         margin: 8px 0;
-        padding: 8px 12px;
+        padding: 8px;
         background: var(--secondary-background-color);
-        border-radius: 6px;
+        border-radius: 4px;
         font-size: 0.8em;
         overflow-x: auto;
-        white-space: pre;
         max-height: 150px;
-        overflow-y: auto;
       }
       .tool-result {
         margin-top: 8px;
-        padding: 8px 12px;
-        background: rgba(76, 175, 80, 0.1);
-        border-radius: 6px;
-        border-left: 3px solid var(--success-color, #4caf50);
+        padding: 8px;
+        background: #4caf5010;
+        border-left: 3px solid #4caf50;
+        border-radius: 0 4px 4px 0;
       }
       .tool-result.error {
-        background: rgba(244, 67, 54, 0.1);
-        border-left-color: var(--error-color, #f44336);
+        background: #f4433610;
+        border-left-color: #f44336;
       }
       .tool-result-label {
-        display: block;
         font-size: 0.8em;
         font-weight: 500;
-        margin-bottom: 4px;
         color: var(--secondary-text-color);
+        margin-bottom: 4px;
+        display: block;
       }
       .tool-output {
         margin: 0;
         font-size: 0.8em;
-        white-space: pre-wrap;
-        word-break: break-word;
+        overflow-x: auto;
         max-height: 200px;
-        overflow-y: auto;
       }
-
-      /* History image placeholder */
-      .history-image {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 8px 12px;
-        background: var(--secondary-background-color);
-        border-radius: 6px;
+      .message-meta {
+        margin-top: 8px;
+        font-size: 0.75em;
         color: var(--secondary-text-color);
-        font-size: 0.9em;
-      }
-      .history-image ha-icon {
-        --mdc-icon-size: 18px;
-      }
-
-      /* Chat modal styles */
-      .chat-modal {
-        display: flex;
-        flex-direction: column;
-      }
-      .chat-modal .history-body {
-        flex: 1;
-        max-height: calc(85vh - 180px);
       }
       .chat-input-container {
         display: flex;
-        align-items: flex-end;
         gap: 8px;
-        padding: 12px 20px;
-        background: var(--card-background-color);
-        border-top: 1px solid var(--divider-color);
-      }
-      .chat-input {
-        flex: 1;
-        padding: 10px 14px;
-        border: 1px solid var(--divider-color);
-        border-radius: 20px;
-        background: var(--secondary-background-color);
-        color: var(--primary-text-color);
-        font-size: 0.95em;
-        font-family: inherit;
-        resize: none;
-        min-height: 20px;
-        max-height: 120px;
-        outline: none;
-        transition: border-color 0.2s;
-      }
-      .chat-input:focus {
-        border-color: var(--primary-color, #03a9f4);
-      }
-      .chat-input::placeholder {
-        color: var(--secondary-text-color);
-      }
-      .chat-send-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 40px;
-        height: 40px;
-        border: none;
-        border-radius: 50%;
-        background: var(--primary-color, #03a9f4);
-        color: white;
-        cursor: pointer;
-        transition: background 0.2s, transform 0.1s;
-        flex-shrink: 0;
-      }
-      .chat-send-btn:hover {
-        background: #0288d1;
-      }
-      .chat-send-btn:active {
-        transform: scale(0.95);
-      }
-      .chat-send-btn ha-icon {
-        --mdc-icon-size: 20px;
-      }
-
-      /* Open chat button style */
-      .open-chat-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 8px;
-        width: 100%;
         padding: 12px 16px;
-        background: var(--primary-color, #03a9f4);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        font-size: 1em;
-        font-weight: 500;
-        cursor: pointer;
-        transition: background 0.2s, transform 0.1s;
+        border-top: 1px solid var(--divider-color);
+        background: var(--card-background-color);
+        align-items: flex-end;
       }
-      .open-chat-btn:hover {
-        background: #0288d1;
-      }
-      .open-chat-btn:active {
-        transform: scale(0.98);
-      }
-      .open-chat-btn ha-icon {
-        --mdc-icon-size: 20px;
-      }
-
-      /* Agent selector */
       .agent-selector {
         padding: 8px 12px;
         border: 1px solid var(--divider-color);
-        border-radius: 20px;
-        background: var(--secondary-background-color);
+        border-radius: 8px;
+        background: var(--card-background-color);
         color: var(--primary-text-color);
-        font-size: 0.85em;
-        font-family: inherit;
-        outline: none;
+        font-size: 0.9em;
         cursor: pointer;
-        min-width: 100px;
-        max-width: 150px;
-        transition: border-color 0.2s;
-      }
-      .agent-selector:focus {
-        border-color: var(--primary-color, #03a9f4);
+        min-width: 120px;
       }
       .agent-selector.loading {
         display: flex;
         align-items: center;
         justify-content: center;
-        width: 40px;
+        padding: 8px;
+        min-width: 40px;
         border: none;
         background: transparent;
       }
       .agent-selector.loading ha-icon {
-        --mdc-icon-size: 18px;
+        --mdc-icon-size: 20px;
         color: var(--secondary-text-color);
       }
-      
-      /* Working indicator in header */
-      .working-indicator {
-        display: flex;
-        align-items: center;
-        padding: 4px 8px;
-        background: rgba(33, 150, 243, 0.2);
-        border-radius: 12px;
-        margin-right: 4px;
+      .chat-input {
+        flex: 1;
+        padding: 12px;
+        border: 1px solid var(--divider-color);
+        border-radius: 8px;
+        background: var(--card-background-color);
+        color: var(--primary-text-color);
+        font-size: 1em;
+        font-family: inherit;
+        resize: none;
+        min-height: 44px;
+        max-height: 120px;
       }
-      .working-indicator ha-icon {
-        --mdc-icon-size: 16px;
-        color: var(--info-color, #2196f3);
+      .chat-input:focus {
+        outline: none;
+        border-color: var(--primary-color);
+      }
+      .chat-send-btn {
+        padding: 12px;
+        background: var(--primary-color);
+        color: var(--text-primary-color, #fff);
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: opacity 0.2s;
+      }
+      .chat-send-btn:hover {
+        opacity: 0.9;
+      }
+      .chat-send-btn ha-icon {
+        --mdc-icon-size: 20px;
       }
 
-      /* Tooltip for timestamps */
-      .message-time {
-        cursor: help;
-      }
-      .message-time:hover {
-        text-decoration: underline dotted;
-      }
-      
-      /* Inline permission card in chat */
       .inline-permission {
-        margin-top: 16px;
+        margin: 16px 0;
         padding: 16px;
-        background: rgba(255, 152, 0, 0.1);
-        border: 1px solid var(--warning-color, #ff9800);
+        background: #ff980015;
+        border: 1px solid #ff9800;
         border-radius: 12px;
       }
       .inline-permission-header {
         display: flex;
         align-items: center;
-        gap: 10px;
+        gap: 12px;
         margin-bottom: 12px;
       }
       .inline-permission-header ha-icon {
         --mdc-icon-size: 24px;
-        color: var(--warning-color, #ff9800);
+        color: #ff9800;
       }
       .inline-permission-title {
-        font-weight: 600;
-        font-size: 1.05em;
-        color: var(--primary-text-color);
+        font-weight: 500;
+        font-size: 1.1em;
       }
       .inline-permission-body {
-        margin-bottom: 12px;
+        margin-bottom: 16px;
       }
       .inline-permission-type {
         display: inline-block;
-        padding: 4px 10px;
-        background: var(--warning-color, #ff9800);
-        color: white;
-        border-radius: 12px;
-        font-size: 0.8em;
-        font-weight: 500;
-        margin-bottom: 10px;
+        padding: 4px 8px;
+        background: var(--secondary-background-color);
+        border-radius: 4px;
+        font-size: 0.85em;
+        color: var(--secondary-text-color);
+        margin-bottom: 12px;
       }
       .inline-permission-section {
-        margin-top: 10px;
+        margin-bottom: 12px;
       }
       .inline-permission-label {
         font-size: 0.8em;
-        font-weight: 500;
         color: var(--secondary-text-color);
-        margin-bottom: 4px;
         text-transform: uppercase;
+        margin-bottom: 4px;
       }
       .inline-permission-code {
         display: block;
-        padding: 8px 12px;
+        padding: 8px;
         background: var(--card-background-color);
-        border-radius: 6px;
+        border-radius: 4px;
+        font-family: monospace;
         font-size: 0.85em;
         word-break: break-all;
       }
       .inline-permission-metadata {
-        padding: 8px 12px;
-        background: var(--card-background-color);
-        border-radius: 6px;
-        font-size: 0.85em;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
       }
       .inline-metadata-item {
         display: flex;
         gap: 8px;
-        margin-bottom: 4px;
-      }
-      .inline-metadata-item:last-child {
-        margin-bottom: 0;
+        font-size: 0.9em;
       }
       .inline-metadata-key {
-        font-weight: 500;
         color: var(--secondary-text-color);
       }
       .inline-metadata-value {
-        color: var(--primary-text-color);
-        word-break: break-word;
+        font-family: monospace;
+        word-break: break-all;
       }
       .inline-permission-loading {
         display: flex;
@@ -2955,62 +2584,47 @@ class OpenCodeCard extends HTMLElement {
         gap: 8px;
         color: var(--secondary-text-color);
         font-size: 0.9em;
-        padding: 8px 0;
-      }
-      .inline-permission-loading ha-icon {
-        --mdc-icon-size: 18px;
       }
       .inline-permission-actions {
         display: flex;
         gap: 8px;
-        flex-wrap: wrap;
       }
       .inline-perm-btn {
+        flex: 1;
         display: flex;
         align-items: center;
+        justify-content: center;
         gap: 6px;
-        padding: 8px 14px;
+        padding: 10px;
         border: none;
-        border-radius: 20px;
-        font-size: 0.9em;
-        font-weight: 500;
+        border-radius: 8px;
         cursor: pointer;
-        transition: background 0.2s, transform 0.1s, opacity 0.2s;
+        font-size: 0.85em;
+        transition: opacity 0.2s;
       }
       .inline-perm-btn:disabled {
         opacity: 0.5;
         cursor: not-allowed;
       }
-      .inline-perm-btn:not(:disabled):active {
-        transform: scale(0.97);
-      }
       .inline-perm-btn ha-icon {
         --mdc-icon-size: 16px;
       }
       .inline-perm-btn.reject {
-        background: rgba(244, 67, 54, 0.15);
-        color: var(--error-color, #f44336);
-      }
-      .inline-perm-btn.reject:not(:disabled):hover {
-        background: rgba(244, 67, 54, 0.25);
+        background: #f4433620;
+        color: #f44336;
       }
       .inline-perm-btn.allow-once {
-        background: rgba(76, 175, 80, 0.15);
-        color: var(--success-color, #4caf50);
-      }
-      .inline-perm-btn.allow-once:not(:disabled):hover {
-        background: rgba(76, 175, 80, 0.25);
+        background: #4caf5020;
+        color: #4caf50;
       }
       .inline-perm-btn.allow-always {
-        background: var(--success-color, #4caf50);
-        color: white;
-      }
-      .inline-perm-btn.allow-always:not(:disabled):hover {
-        background: #388e3c;
+        background: #2196f320;
+        color: #2196f3;
       }
     `;
   }
 
+  // Required for custom cards
   static getConfigElement() {
     return document.createElement("opencode-card-editor");
   }
@@ -3022,137 +2636,13 @@ class OpenCodeCard extends HTMLElement {
   }
 }
 
-// Visual config editor with device selector
-class OpenCodeCardEditor extends HTMLElement {
-  private _config?: CardConfig;
-  private _hass?: HomeAssistant;
-  private _devices: DeviceRegistryEntry[] = [];
-
-  set hass(hass: HomeAssistant) {
-    this._hass = hass;
-    this._fetchDevices();
-  }
-
-  setConfig(config: CardConfig) {
-    this._config = config;
-    this._render();
-  }
-
-  private async _fetchDevices() {
-    if (!this._hass) return;
-
-    try {
-      const deviceResponse = await this._hass.callWS({
-        type: "config/device_registry/list",
-      }) as DeviceRegistryEntry[];
-      
-      this._devices = deviceResponse.filter(d => d.manufacturer === "OpenCode");
-      this._render();
-    } catch (err) {
-      console.error("[opencode-card-editor] Failed to fetch devices:", err);
-    }
-  }
-
-  private _render() {
-    const currentDevice = this._config?.device ?? "";
-    const currentTitle = this._config?.title ?? "";
-
-    this.innerHTML = `
-      <div class="editor">
-        <div class="field">
-          <label for="title">Title</label>
-          <input type="text" id="title" value="${currentTitle}" placeholder="OpenCode Sessions">
-          <div class="hint">Leave empty to use default title. Hidden when device is selected.</div>
-        </div>
-        <div class="field">
-          <label for="device">Pin to Device</label>
-          <select id="device">
-            <option value="">Show all devices</option>
-            ${this._devices.map(d => `
-              <option value="${d.id}" ${d.id === currentDevice ? "selected" : ""}>
-                ${d.name}
-              </option>
-            `).join("")}
-          </select>
-          <div class="hint">Select a device to show detailed view for that device only.</div>
-        </div>
-      </div>
-      <style>
-        .editor {
-          padding: 16px;
-        }
-        .field {
-          margin-bottom: 16px;
-        }
-        .field:last-child {
-          margin-bottom: 0;
-        }
-        label {
-          display: block;
-          font-weight: 500;
-          margin-bottom: 8px;
-          color: var(--primary-text-color);
-        }
-        input, select {
-          width: 100%;
-          padding: 8px 12px;
-          border: 1px solid var(--divider-color);
-          border-radius: 4px;
-          background: var(--card-background-color);
-          color: var(--primary-text-color);
-          font-size: 1em;
-          box-sizing: border-box;
-        }
-        input:focus, select:focus {
-          outline: none;
-          border-color: var(--primary-color);
-        }
-        .hint {
-          font-size: 0.85em;
-          color: var(--secondary-text-color);
-          margin-top: 4px;
-        }
-      </style>
-    `;
-
-    // Add event listeners
-    const titleInput = this.querySelector("#title") as HTMLInputElement;
-    const deviceSelect = this.querySelector("#device") as HTMLSelectElement;
-
-    titleInput?.addEventListener("input", (ev) => this._valueChanged("title", (ev.target as HTMLInputElement).value));
-    deviceSelect?.addEventListener("change", (ev) => this._valueChanged("device", (ev.target as HTMLSelectElement).value));
-  }
-
-  private _valueChanged(field: string, value: string) {
-    const newConfig = {
-      ...this._config,
-      [field]: value || undefined,
-    };
-
-    // Clean up empty values
-    if (!newConfig.title) delete newConfig.title;
-    if (!newConfig.device) delete newConfig.device;
-    
-    const event = new CustomEvent("config-changed", {
-      detail: { config: newConfig },
-      bubbles: true,
-      composed: true,
-    });
-    this.dispatchEvent(event);
-  }
-}
-
 // Register the card
 customElements.define("opencode-card", OpenCodeCard);
-customElements.define("opencode-card-editor", OpenCodeCardEditor);
 
-// Register with Home Assistant
-(window as unknown as { customCards: { type: string; name: string; description: string }[] }).customCards = 
-  (window as unknown as { customCards: { type: string; name: string; description: string }[] }).customCards || [];
-(window as unknown as { customCards: { type: string; name: string; description: string }[] }).customCards.push({
+// Card registration info for HA
+(window as unknown as { customCards: unknown[] }).customCards = (window as unknown as { customCards: unknown[] }).customCards || [];
+(window as unknown as { customCards: unknown[] }).customCards.push({
   type: "opencode-card",
   name: "OpenCode Card",
-  description: "Display OpenCode sessions and their states",
+  description: "Display and interact with OpenCode AI coding assistant sessions",
 });
-
-console.info("%c OPENCODE-CARD %c 0.1.0 ", "color: white; background: #2196f3; font-weight: bold;", "color: #2196f3; background: white; font-weight: bold;");

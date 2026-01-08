@@ -1,5 +1,6 @@
 {
-  "name": "OpenCode Card",
+  "name": "OpenCode",
+  "homeassistant": "2024.1.0",
   "render_readme": true,
-  "filename": "opencode-card.js"
+  "content_in_root": false
 }

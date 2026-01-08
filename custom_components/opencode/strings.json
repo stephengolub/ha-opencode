@@ -1,0 +1,35 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up OpenCode",
+        "description": "This integration allows OpenCode instances to connect and be controlled from Home Assistant.\n\nAfter setup, use the integration options to pair OpenCode instances."
+      }
+    },
+    "abort": {
+      "already_configured": "OpenCode is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "menu": {
+        "title": "OpenCode Options",
+        "menu_options": {
+          "pair_new": "Pair new instance",
+          "manage_instances": "Manage instances"
+        }
+      },
+      "pair_new": {
+        "title": "Pair New Instance",
+        "description": "Enter this pairing code in your OpenCode instance:\n\n**{pairing_code}**\n\nRun `/ha-pair` in OpenCode and enter:\n- Home Assistant URL: Your HA URL\n- Pairing Code: {pairing_code}\n\nThis code expires in 5 minutes."
+      },
+      "manage_instances": {
+        "title": "Manage Instances",
+        "description": "Connected OpenCode instances:\n\n{instances}"
+      }
+    },
+    "abort": {
+      "not_ready": "Integration is not ready"
+    }
+  }
+}

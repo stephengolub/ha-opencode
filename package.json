@@ -23,8 +23,8 @@
   "author": "Stephen Golub",
   "license": "MIT",
   "scripts": {
-    "build": "esbuild src/opencode-card.ts --bundle --outfile=dist/opencode-card.js --format=esm --target=es2020 --minify",
-    "dev": "esbuild src/opencode-card.ts --bundle --outfile=dist/opencode-card.js --format=esm --target=es2020 --watch"
+    "build": "esbuild frontend/src/opencode-card.ts --bundle --outfile=frontend/dist/opencode-card.js --format=esm --target=es2020 --minify",
+    "dev": "esbuild frontend/src/opencode-card.ts --bundle --outfile=frontend/dist/opencode-card.js --format=esm --target=es2020 --watch"
   },
   "devDependencies": {
     "esbuild": "^0.20.0",
