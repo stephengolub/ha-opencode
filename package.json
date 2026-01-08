@@ -5,11 +5,11 @@
   "main": "dist/opencode-card.js",
   "repository": {
     "type": "git",
-    "url": "git+https://gitlab.com/opencode-home-assistant/opencode-card.git"
+    "url": "git+https://github.com/stephengolub/ha-opencode.git"
   },
-  "homepage": "https://gitlab.com/opencode-home-assistant/opencode-card#readme",
+  "homepage": "https://stephengolub.github.io/ha-opencode",
   "bugs": {
-    "url": "https://gitlab.com/opencode-home-assistant/opencode-card/-/issues"
+    "url": "https://github.com/stephengolub/ha-opencode/issues"
   },
   "keywords": [
     "home-assistant",
@@ -17,7 +17,7 @@
     "custom-card",
     "opencode",
     "ai",
-    "mqtt",
+    "websocket",
     "hacs"
   ],
   "author": "Stephen Golub",

@@ -1,6 +1,13 @@
 # OpenCode Home Assistant Integration
 
+[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://stephengolub.github.io/ha-opencode)
+[![GitHub Release](https://img.shields.io/github/v/release/stephengolub/ha-opencode)](https://github.com/stephengolub/ha-opencode/releases)
+[![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 A native Home Assistant integration for [OpenCode](https://opencode.ai), the AI coding assistant. Monitor and control your OpenCode sessions directly from Home Assistant.
+
+**[Full Documentation](https://stephengolub.github.io/ha-opencode)** | **[OpenCode Plugin](https://github.com/stephengolub/opencode-homeassistant)**
 
 ## Features
 
@@ -291,9 +298,22 @@ npm run build
 npm run dev
 ```
 
+## Documentation
+
+Full documentation is available at **[stephengolub.github.io/ha-opencode](https://stephengolub.github.io/ha-opencode)**
+
+- [Installation](https://stephengolub.github.io/ha-opencode/installation/)
+- [Setup Guide](https://stephengolub.github.io/ha-opencode/setup/)
+- [Entities Reference](https://stephengolub.github.io/ha-opencode/entities/)
+- [Services Reference](https://stephengolub.github.io/ha-opencode/services/)
+- [Lovelace Card](https://stephengolub.github.io/ha-opencode/card/)
+- [Blueprints](https://stephengolub.github.io/ha-opencode/blueprints/)
+- [Automations](https://stephengolub.github.io/ha-opencode/automations/)
+- [Troubleshooting](https://stephengolub.github.io/ha-opencode/troubleshooting/)
+
 ## Related Projects
 
-- [opencode-homeassistant](https://github.com/stephengolub/opencode-homeassistant) - OpenCode plugin (required)
+- [opencode-homeassistant](https://github.com/stephengolub/opencode-homeassistant) - OpenCode plugin (required) ([docs](https://stephengolub.github.io/opencode-homeassistant))
 - [OpenCode](https://opencode.ai) - AI coding assistant
 
 ## License
