@@ -215,6 +215,7 @@ class OpenCodeCard extends HTMLElement {
   private _agentsLoading = false;
   // Auto-refresh when working
   private _autoRefreshInterval: ReturnType<typeof setInterval> | null = null;
+  private _autoRefreshEnabled = true; // Toggle for auto-refresh
   private _lastDeviceState: string | null = null;
   // Sorting
   private _sortMode: "activity" | "name" = "activity";
@@ -269,7 +270,8 @@ class OpenCodeCard extends HTMLElement {
   private _manageAutoRefresh(currentState: string) {
     const refreshInterval = (this._config?.working_refresh_interval ?? 10) * 1000;
     
-    if (currentState === "working") {
+    // Only auto-refresh if enabled and session is working
+    if (currentState === "working" && this._autoRefreshEnabled) {
       if (!this._autoRefreshInterval) {
         this._autoRefreshInterval = setInterval(() => {
           if (this._showHistoryView && !this._historyLoading) {
@@ -283,6 +285,24 @@ class OpenCodeCard extends HTMLElement {
         this._autoRefreshInterval = null;
       }
     }
+  }
+  
+  private _toggleAutoRefresh() {
+    this._autoRefreshEnabled = !this._autoRefreshEnabled;
+    
+    // If we just enabled it, check if we need to start refreshing
+    if (this._autoRefreshEnabled && this._historyDeviceId) {
+      const device = this._devices.get(this._historyDeviceId);
+      const stateEntity = device?.entities.get("state");
+      const currentState = stateEntity?.state ?? "unknown";
+      this._manageAutoRefresh(currentState);
+    } else if (!this._autoRefreshEnabled && this._autoRefreshInterval) {
+      // If we disabled it, stop the interval
+      clearInterval(this._autoRefreshInterval);
+      this._autoRefreshInterval = null;
+    }
+    
+    this._render();
   }
 
   private _computeStateHash(): string {
@@ -678,6 +698,7 @@ class OpenCodeCard extends HTMLElement {
     this._selectedAgent = null;
     this._agentsLoading = false;
     this._lastDeviceState = null;
+    this._autoRefreshEnabled = true; // Reset to default on close
     
     if (this._autoRefreshInterval) {
       clearInterval(this._autoRefreshInterval);
@@ -773,7 +794,15 @@ class OpenCodeCard extends HTMLElement {
     this._historyLoading = false;
     this._render();
 
-    if (isInitialLoad || (hadNewMessages && this._isAtBottom)) {
+    // Auto-scroll conditions:
+    // 1. Initial load - always scroll to bottom
+    // 2. New messages AND (user is at bottom OR auto-refresh is enabled with working session)
+    const device = this._historyDeviceId ? this._devices.get(this._historyDeviceId) : null;
+    const isWorking = device?.entities.get("state")?.state === "working";
+    const shouldAutoScroll = isInitialLoad || 
+      (hadNewMessages && (this._isAtBottom || (this._autoRefreshEnabled && isWorking)));
+    
+    if (shouldAutoScroll) {
       setTimeout(() => this._scrollToBottom(), 0);
     }
   }
@@ -960,6 +989,10 @@ class OpenCodeCard extends HTMLElement {
     this.querySelector(".history-refresh-btn")?.addEventListener("click", () => {
       this._refreshHistory();
     });
+    
+    this.querySelector(".auto-refresh-toggle")?.addEventListener("click", () => {
+      this._toggleAutoRefresh();
+    });
 
     this.querySelector(".history-load-more")?.addEventListener("click", () => {
       this._loadMoreHistory();
@@ -1049,6 +1082,30 @@ class OpenCodeCard extends HTMLElement {
         }
       });
     });
+    
+    // Copy buttons
+    this.querySelectorAll(".copy-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const messageId = (btn as HTMLElement).dataset.messageId;
+        if (!messageId) return;
+        
+        const msg = this._historyData?.messages.find(m => m.id === messageId);
+        if (msg) {
+          const markdown = this._getRawMarkdownFromMessage(msg);
+          this._copyToClipboard(markdown, btn as HTMLElement);
+        }
+      });
+    });
+    
+    // Text selection auto-copy on mouseup within history body
+    const historyBodyEl = this.querySelector(".history-body");
+    if (historyBodyEl) {
+      historyBodyEl.addEventListener("mouseup", () => {
+        // Small delay to ensure selection is complete
+        setTimeout(() => this._handleTextSelection(), 10);
+      });
+    }
   }
   
   private async _respondToInlinePermission(response: "once" | "always" | "reject") {
@@ -1118,6 +1175,77 @@ class OpenCodeCard extends HTMLElement {
       .filter(part => part.type === "text" && part.content)
       .map(part => part.content)
       .join("\n");
+  }
+
+  private async _copyToClipboard(text: string, buttonEl?: HTMLElement): Promise<boolean> {
+    try {
+      await navigator.clipboard.writeText(text);
+      
+      // Show visual feedback if button element provided
+      if (buttonEl) {
+        const icon = buttonEl.querySelector("ha-icon");
+        const originalIcon = icon?.getAttribute("icon");
+        if (icon && originalIcon) {
+          icon.setAttribute("icon", "mdi:check");
+          buttonEl.classList.add("copied");
+          setTimeout(() => {
+            icon.setAttribute("icon", originalIcon);
+            buttonEl.classList.remove("copied");
+          }, 1500);
+        }
+      }
+      return true;
+    } catch (err) {
+      console.error("[opencode-card] Failed to copy to clipboard:", err);
+      return false;
+    }
+  }
+
+  private _getRawMarkdownFromMessage(msg: HistoryMessage): string {
+    return msg.parts
+      .map(part => {
+        if (part.type === "text" && part.content) {
+          return part.content;
+        } else if (part.type === "tool_call") {
+          let toolMd = `**Tool: ${part.tool_name || "unknown"}**\n`;
+          if (part.tool_args) {
+            toolMd += "```json\n" + JSON.stringify(part.tool_args, null, 2) + "\n```\n";
+          }
+          if (part.tool_output) {
+            toolMd += "**Output:**\n```\n" + part.tool_output + "\n```\n";
+          }
+          if (part.tool_error) {
+            toolMd += "**Error:**\n```\n" + part.tool_error + "\n```\n";
+          }
+          return toolMd;
+        } else if (part.type === "image") {
+          return `[Image: ${part.content || "embedded"}]`;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n\n");
+  }
+
+  private _handleTextSelection() {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return;
+    
+    const selectedText = selection.toString().trim();
+    if (!selectedText) return;
+    
+    // Check if selection is within history body
+    const historyBody = this.querySelector(".history-body");
+    if (!historyBody) return;
+    
+    const anchorNode = selection.anchorNode;
+    const focusNode = selection.focusNode;
+    
+    if (!anchorNode || !focusNode) return;
+    if (!historyBody.contains(anchorNode) || !historyBody.contains(focusNode)) return;
+    
+    // Copy selected text to clipboard
+    this._copyToClipboard(selectedText);
   }
 
   private _loadMoreHistory() {
@@ -1224,6 +1352,9 @@ class OpenCodeCard extends HTMLElement {
     const stateEntity = device?.entities.get("state");
     const currentState = stateEntity?.state ?? "unknown";
     const isWorking = currentState === "working";
+    
+    const autoRefreshIcon = this._autoRefreshEnabled ? "mdi:sync" : "mdi:sync-off";
+    const autoRefreshTitle = this._autoRefreshEnabled ? "Auto-refresh ON (click to disable)" : "Auto-refresh OFF (click to enable)";
 
     return `
       <div class="modal-backdrop history-modal-backdrop">
@@ -1233,6 +1364,9 @@ class OpenCodeCard extends HTMLElement {
             <span class="modal-title">${this._historyData?.session_title || "Chat"}</span>
             <div class="history-header-actions">
               ${isWorking ? `<span class="working-indicator"><ha-icon icon="mdi:loading" class="spinning"></ha-icon></span>` : ""}
+              <button class="auto-refresh-toggle ${this._autoRefreshEnabled ? "enabled" : ""}" title="${autoRefreshTitle}">
+                <ha-icon icon="${autoRefreshIcon}"></ha-icon>
+              </button>
               <button class="history-refresh-btn" title="Refresh history" ${this._historyLoading ? "disabled" : ""}>
                 <ha-icon icon="mdi:refresh" class="${this._historyLoading ? "spinning" : ""}"></ha-icon>
               </button>
@@ -1453,13 +1587,23 @@ class OpenCodeCard extends HTMLElement {
       </button>
     ` : "";
 
+    // Add copy button for all messages
+    const copyButtonHtml = `
+      <button class="copy-btn" data-message-id="${msg.id}" title="Copy as Markdown">
+        <ha-icon icon="mdi:content-copy"></ha-icon>
+      </button>
+    `;
+
     return `
-      <div class="history-message ${isUser ? "user" : "assistant"}">
+      <div class="history-message ${isUser ? "user" : "assistant"}" data-message-id="${msg.id}">
         <div class="message-header">
           <ha-icon icon="${isUser ? "mdi:account" : "mdi:robot"}"></ha-icon>
           <span class="message-role">${isUser ? "You" : "Assistant"}</span>
           <span class="message-time" title="${timeInfo.tooltip}">${timeInfo.display}</span>
-          ${speakButtonHtml}
+          <div class="message-actions">
+            ${copyButtonHtml}
+            ${speakButtonHtml}
+          </div>
         </div>
         <div class="message-content">
           ${partsHtml}
@@ -2364,6 +2508,27 @@ class OpenCodeCard extends HTMLElement {
       .history-refresh-btn ha-icon {
         --mdc-icon-size: 20px;
       }
+      .auto-refresh-toggle {
+        background: none;
+        border: none;
+        padding: 8px;
+        cursor: pointer;
+        border-radius: 50%;
+        color: var(--secondary-text-color);
+        transition: background 0.2s, color 0.2s;
+        opacity: 0.6;
+      }
+      .auto-refresh-toggle:hover {
+        background: var(--secondary-background-color);
+        opacity: 1;
+      }
+      .auto-refresh-toggle.enabled {
+        color: var(--primary-color);
+        opacity: 1;
+      }
+      .auto-refresh-toggle ha-icon {
+        --mdc-icon-size: 20px;
+      }
       .history-body-container {
         position: relative;
         flex: 1;
@@ -2373,6 +2538,12 @@ class OpenCodeCard extends HTMLElement {
         height: 400px;
         overflow-y: auto;
         padding: 16px;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      .history-body ::selection {
+        background: var(--primary-color);
+        color: var(--text-primary-color, #fff);
       }
       .scroll-to-bottom-btn {
         position: absolute;
@@ -2463,6 +2634,36 @@ class OpenCodeCard extends HTMLElement {
       .message-time {
         color: var(--secondary-text-color);
         margin-left: auto;
+      }
+      .message-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .copy-btn {
+        background: none;
+        border: none;
+        padding: 4px;
+        cursor: pointer;
+        border-radius: 50%;
+        color: var(--secondary-text-color);
+        transition: background 0.2s, color 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0.6;
+      }
+      .copy-btn:hover {
+        background: var(--divider-color);
+        color: var(--primary-text-color);
+        opacity: 1;
+      }
+      .copy-btn.copied {
+        color: #4caf50;
+        opacity: 1;
+      }
+      .copy-btn ha-icon {
+        --mdc-icon-size: 16px;
       }
       .speak-btn {
         background: none;

@@ -1,22 +1,22 @@
-function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(isNaN(g.getTime()))return{display:"Unknown",tooltip:"Invalid timestamp"};let e=new Date,t=e.getTime()-g.getTime(),i=Math.floor(t/6e4),s=Math.floor(t/36e5),n=g.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),a=g.toLocaleDateString([],{month:"short",day:"numeric"}),r=g.toLocaleString(),d=g.toDateString()===e.toDateString();if(s>=2)return d?{display:n,tooltip:r}:{display:`${a} ${n}`,tooltip:r};if(i<1)return{display:"Just now",tooltip:r};if(i<60)return{display:`${i}m ago`,tooltip:r};{let o=Math.floor(i/60),c=i%60;return c===0?{display:`${o}h ago`,tooltip:r}:{display:`${o}h ${c}m ago`,tooltip:r}}}var $={idle:{icon:"mdi:sleep",color:"#4caf50",label:"Idle"},working:{icon:"mdi:cog",color:"#2196f3",label:"Working"},waiting_permission:{icon:"mdi:shield-alert",color:"#ff9800",label:"Needs Permission"},error:{icon:"mdi:alert-circle",color:"#f44336",label:"Error"},unknown:{icon:"mdi:help-circle",color:"#9e9e9e",label:"Unknown"}},_=class _ extends HTMLElement{constructor(){super(...arguments);this._devices=new Map;this._deviceRegistry=new Map;this._entityRegistry=new Map;this._initialized=!1;this._showPermissionModal=!1;this._activePermission=null;this._selectedDeviceId=null;this._showHistoryView=!1;this._historyLoading=!1;this._historyData=null;this._historySessionId=null;this._historyDeviceId=null;this._historyVisibleCount=10;this._historyLoadingMore=!1;this._isAtBottom=!0;this._pendingPermissions=new Map;this._lastRenderHash="";this._availableAgents=[];this._selectedAgent=null;this._agentsLoading=!1;this._autoRefreshInterval=null;this._lastDeviceState=null;this._sortMode="activity";this._stateChangeUnsubscribe=null;this._historyResponseUnsubscribe=null;this._agentsResponseUnsubscribe=null;this._speakingMessageId=null}set hass(e){if(this._hass=e,!this._initialized)this._initialize();else{if(this._updateDevices(),this._showHistoryView&&this._historyDeviceId){let n=this._devices.get(this._historyDeviceId)?.entities.get("state")?.state??"unknown";this._lastDeviceState!==null&&this._lastDeviceState!==n&&this._refreshHistory(),this._lastDeviceState=n,this._manageAutoRefresh(n);return}if(this._showPermissionModal&&this._activePermission){let i=this._findDeviceIdForPermission(this._activePermission);if(i){let s=this._pendingPermissions.get(i);if(s&&s.permission_id&&!this._activePermission.permission_id){this._activePermission=s,this._render();return}}return}let t=this._computeStateHash();t!==this._lastRenderHash&&(this._lastRenderHash=t,this._render())}}_manageAutoRefresh(e){let t=(this._config?.working_refresh_interval??10)*1e3;e==="working"?this._autoRefreshInterval||(this._autoRefreshInterval=setInterval(()=>{this._showHistoryView&&!this._historyLoading&&this._refreshHistory()},t)):this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null)}_computeStateHash(){let e=[];for(let[t,i]of this._devices){let s=i.entities.get("state"),n=i.entities.get("session_title"),a=i.entities.get("model"),r=i.entities.get("current_tool"),d=i.entities.get("cost"),o=i.entities.get("tokens_input"),c=i.entities.get("tokens_output"),l=i.entities.get("permission_pending"),p=i.entities.get("last_activity"),f=s?.attributes?.agent,m=s?.attributes?.current_agent;e.push(`${t}:${s?.state}:${n?.state}:${a?.state}:${r?.state}:${d?.state}:${o?.state}:${c?.state}:${l?.state}:${p?.state}:${f}:${m}`),l?.state==="on"&&e.push(`perm:${l.attributes?.permission_id}`)}for(let[t,i]of this._pendingPermissions)e.push(`pending:${t}:${i.permission_id}`);return e.join("|")}_findDeviceIdForPermission(e){for(let[t,i]of this._devices)if(i.sessionId===e.session_id)return t;return null}setConfig(e){this._config=e}async _initialize(){this._hass&&(this._initialized=!0,await this._fetchRegistries(),this._updateDevices(),await this._setupEventSubscriptions(),this._render())}async _setupEventSubscriptions(){this._hass&&(this._stateChangeUnsubscribe=await this._hass.connection.subscribeEvents(e=>{let t=e.data;this._updateDevices();let i=this._computeStateHash();i!==this._lastRenderHash&&(this._lastRenderHash=i,this._render())},"opencode_state_change"),this._historyResponseUnsubscribe=await this._hass.connection.subscribeEvents(e=>{let t=e.data;this._historySessionId&&t.session_id===this._historySessionId&&this._handleHistoryResponse(t.history)},"opencode_history_response"),this._agentsResponseUnsubscribe=await this._hass.connection.subscribeEvents(e=>{let t=e.data;this._historySessionId&&t.session_id===this._historySessionId&&(this._availableAgents=t.agents,this._agentsLoading=!1,this._render())},"opencode_agents_response"))}disconnectedCallback(){this._stateChangeUnsubscribe&&(this._stateChangeUnsubscribe(),this._stateChangeUnsubscribe=null),this._historyResponseUnsubscribe&&(this._historyResponseUnsubscribe(),this._historyResponseUnsubscribe=null),this._agentsResponseUnsubscribe&&(this._agentsResponseUnsubscribe(),this._agentsResponseUnsubscribe=null),this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null),this._stopSpeaking()}async _fetchRegistries(){if(this._hass)try{let e=await this._hass.callWS({type:"config/device_registry/list"});for(let i of e)i.manufacturer==="OpenCode"&&this._deviceRegistry.set(i.id,i);let t=await this._hass.callWS({type:"config/entity_registry/list"});for(let i of t)i.platform==="opencode"&&this._deviceRegistry.has(i.device_id)&&this._entityRegistry.set(i.entity_id,i)}catch(e){console.error("[opencode-card] Failed to fetch registries:",e)}}_updateDevices(){if(this._hass){this._devices.clear();for(let[e,t]of this._entityRegistry){let i=this._deviceRegistry.get(t.device_id);if(!i)continue;let s=this._hass.states[e];if(!s)continue;let n=this._devices.get(i.id);if(!n){let o=i.identifiers?.[0]?.[1]?.replace("opencode_","ses_")||"";n={deviceId:i.id,deviceName:i.name,sessionId:o,entities:new Map},this._devices.set(i.id,n)}let a=t.unique_id||"",r=i.identifiers?.[0]?.[1]||"",d="";if(r&&a.startsWith(r+"_"))d=a.slice(r.length+1);else{let o=["state","session_title","model","current_tool","tokens_input","tokens_output","cost","last_activity","permission_pending"];for(let c of o)if(a.endsWith("_"+c)){d=c;break}}d&&n.entities.set(d,s)}this._updatePendingPermissions()}}_updatePendingPermissions(){for(let[e,t]of this._devices){let i=t.entities.get("permission_pending"),s=t.entities.get("state");if(i?.state==="on"&&i.attributes){let n=i.attributes;n.permission_id&&n.permission_title&&this._pendingPermissions.set(e,{permission_id:n.permission_id,type:n.permission_type||"unknown",title:n.permission_title,session_id:t.sessionId,pattern:n.pattern,metadata:n.metadata})}else s?.state!=="waiting_permission"||i?.state==="off"?this._pendingPermissions.delete(e):s?.state==="waiting_permission"&&!this._pendingPermissions.has(e)&&this._pendingPermissions.set(e,{permission_id:"",type:"pending",title:"Permission Required",session_id:t.sessionId})}}_getPinnedDevice(){return this._config?.device&&this._devices.get(this._config.device)||null}_getPermissionDetails(e){let t=this._pendingPermissions.get(e.deviceId);if(t&&t.permission_id)return t;let i=e.entities.get("permission_pending");if(i?.state!=="on"||!i.attributes)return t||null;let s=i.attributes;return{permission_id:s.permission_id,type:s.permission_type,title:s.permission_title,session_id:e.sessionId,pattern:s.pattern,metadata:s.metadata}}_showPermission(e){this._activePermission=e,this._showPermissionModal=!0,this._render()}_hidePermissionModal(){this._showPermissionModal=!1,this._activePermission=null,this._render()}_selectDevice(e){this._selectedDeviceId=e,this._render()}_goBack(){this._selectedDeviceId=null,this._render()}_isPinned(){return!!this._config?.device}async _sendChatMessage(e){if(!(!this._hass||!this._historySessionId||!e.trim()))try{if(this._historyData){let i={id:`temp_${Date.now()}`,role:"user",timestamp:new Date().toISOString(),parts:[{type:"text",content:e.trim()}]};this._historyData.messages.push(i),this._render(),setTimeout(()=>{let s=this.querySelector(".history-body");s&&(s.scrollTop=s.scrollHeight)},0)}let t={session_id:this._historySessionId,text:e.trim()};this._selectedAgent&&(t.agent=this._selectedAgent),await this._hass.callService("opencode","send_prompt",t)}catch(t){console.error("[opencode-card] Failed to send chat message:",t)}}async _showHistory(e,t){this._historyDeviceId=e,this._historySessionId=t,this._showHistoryView=!0,this._historyLoading=!0,this._selectedAgent=null;let s=this._devices.get(e)?.entities.get("state");this._lastDeviceState=s?.state??"unknown",this._manageAutoRefresh(this._lastDeviceState),this._render(),this._fetchAgents();let n=this._loadHistoryFromCache(t);n?(this._historyData=n.data,this._historyLoading=!1,this._render(),await this._fetchHistorySince(n.lastFetched)):await this._fetchFullHistory()}async _fetchAgents(){if(!(!this._hass||!this._historySessionId)){this._agentsLoading=!0;try{await this._hass.callService("opencode","get_agents",{session_id:this._historySessionId,request_id:`agents_${Date.now()}`}),setTimeout(()=>{this._agentsLoading&&(this._agentsLoading=!1,this._render())},1e4)}catch(e){console.error("[opencode-card] Failed to fetch agents:",e),this._agentsLoading=!1}}}_hideHistoryView(){this._showHistoryView=!1,this._historyLoading=!1,this._historyData=null,this._historyDeviceId=null,this._historySessionId=null,this._historyVisibleCount=10,this._isAtBottom=!0,this._availableAgents=[],this._selectedAgent=null,this._agentsLoading=!1,this._lastDeviceState=null,this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null),this._render()}_scrollToBottom(){let e=this.querySelector(".history-body");if(e){e.scrollTop=e.scrollHeight,this._isAtBottom=!0;let t=this.querySelector(".scroll-to-bottom-btn");t&&t.classList.add("hidden")}}_loadHistoryFromCache(e){try{let t=localStorage.getItem(P(e));if(t)return JSON.parse(t)}catch(t){console.error("[opencode-card] Failed to load history from cache:",t)}return null}_saveHistoryToCache(e,t){try{let i={data:t,lastFetched:t.fetched_at};localStorage.setItem(P(e),JSON.stringify(i))}catch(i){console.error("[opencode-card] Failed to save history to cache:",i)}}async _fetchFullHistory(){if(!(!this._hass||!this._historySessionId))try{await this._hass.callService("opencode","get_history",{session_id:this._historySessionId,request_id:`req_${Date.now()}`})}catch(e){console.error("[opencode-card] Failed to request history:",e),this._historyLoading=!1,this._render()}}async _fetchHistorySince(e){if(!(!this._hass||!this._historySessionId))try{await this._hass.callService("opencode","get_history",{session_id:this._historySessionId,since:e,request_id:`req_${Date.now()}`})}catch(t){console.error("[opencode-card] Failed to request history update:",t)}}_handleHistoryResponse(e){if(!this._historySessionId)return;let t=e.since&&e.messages.length>0,i=!this._historyData;if(e.since&&this._historyData){let s=new Set(this._historyData.messages.map(a=>a.id)),n=e.messages.filter(a=>!s.has(a.id));this._historyData.messages.push(...n),this._historyData.fetched_at=e.fetched_at}else this._historyData=e;this._saveHistoryToCache(this._historySessionId,this._historyData),this._historyLoading=!1,this._render(),(i||t&&this._isAtBottom)&&setTimeout(()=>this._scrollToBottom(),0)}_refreshHistory(){!this._historySessionId||!this._historyData||(this._historyLoading=!0,this._render(),this._fetchHistorySince(this._historyData.fetched_at))}async _respondToPermission(e){if(!this._hass||!this._activePermission)return;let{permission_id:t,session_id:i}=this._activePermission;if(!t){console.error("[opencode-card] Cannot respond: missing permission_id");return}try{await this._hass.callService("opencode","respond_permission",{session_id:i,permission_id:t,response:e}),this._hidePermissionModal()}catch(s){console.error("[opencode-card] Failed to send permission response:",s)}}_render(){let e=this._config?.title??"OpenCode Sessions",t=this._getPinnedDevice(),i=this._selectedDeviceId?this._devices.get(this._selectedDeviceId):null,s="";if(t)s=`
+function R(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(isNaN(g.getTime()))return{display:"Unknown",tooltip:"Invalid timestamp"};let e=new Date,i=e.getTime()-g.getTime(),t=Math.floor(i/6e4),s=Math.floor(i/36e5),o=g.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"}),r=g.toLocaleDateString([],{month:"short",day:"numeric"}),n=g.toLocaleString(),d=g.toDateString()===e.toDateString();if(s>=2)return d?{display:o,tooltip:n}:{display:`${r} ${o}`,tooltip:n};if(t<1)return{display:"Just now",tooltip:n};if(t<60)return{display:`${t}m ago`,tooltip:n};{let c=Math.floor(t/60),a=t%60;return a===0?{display:`${c}h ago`,tooltip:n}:{display:`${c}h ${a}m ago`,tooltip:n}}}var $={idle:{icon:"mdi:sleep",color:"#4caf50",label:"Idle"},working:{icon:"mdi:cog",color:"#2196f3",label:"Working"},waiting_permission:{icon:"mdi:shield-alert",color:"#ff9800",label:"Needs Permission"},error:{icon:"mdi:alert-circle",color:"#f44336",label:"Error"},unknown:{icon:"mdi:help-circle",color:"#9e9e9e",label:"Unknown"}},_=class _ extends HTMLElement{constructor(){super(...arguments);this._devices=new Map;this._deviceRegistry=new Map;this._entityRegistry=new Map;this._initialized=!1;this._showPermissionModal=!1;this._activePermission=null;this._selectedDeviceId=null;this._showHistoryView=!1;this._historyLoading=!1;this._historyData=null;this._historySessionId=null;this._historyDeviceId=null;this._historyVisibleCount=10;this._historyLoadingMore=!1;this._isAtBottom=!0;this._pendingPermissions=new Map;this._lastRenderHash="";this._availableAgents=[];this._selectedAgent=null;this._agentsLoading=!1;this._autoRefreshInterval=null;this._autoRefreshEnabled=!0;this._lastDeviceState=null;this._sortMode="activity";this._stateChangeUnsubscribe=null;this._historyResponseUnsubscribe=null;this._agentsResponseUnsubscribe=null;this._speakingMessageId=null}set hass(e){if(this._hass=e,!this._initialized)this._initialize();else{if(this._updateDevices(),this._showHistoryView&&this._historyDeviceId){let o=this._devices.get(this._historyDeviceId)?.entities.get("state")?.state??"unknown";this._lastDeviceState!==null&&this._lastDeviceState!==o&&this._refreshHistory(),this._lastDeviceState=o,this._manageAutoRefresh(o);return}if(this._showPermissionModal&&this._activePermission){let t=this._findDeviceIdForPermission(this._activePermission);if(t){let s=this._pendingPermissions.get(t);if(s&&s.permission_id&&!this._activePermission.permission_id){this._activePermission=s,this._render();return}}return}let i=this._computeStateHash();i!==this._lastRenderHash&&(this._lastRenderHash=i,this._render())}}_manageAutoRefresh(e){let i=(this._config?.working_refresh_interval??10)*1e3;e==="working"&&this._autoRefreshEnabled?this._autoRefreshInterval||(this._autoRefreshInterval=setInterval(()=>{this._showHistoryView&&!this._historyLoading&&this._refreshHistory()},i)):this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null)}_toggleAutoRefresh(){if(this._autoRefreshEnabled=!this._autoRefreshEnabled,this._autoRefreshEnabled&&this._historyDeviceId){let t=this._devices.get(this._historyDeviceId)?.entities.get("state")?.state??"unknown";this._manageAutoRefresh(t)}else!this._autoRefreshEnabled&&this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null);this._render()}_computeStateHash(){let e=[];for(let[i,t]of this._devices){let s=t.entities.get("state"),o=t.entities.get("session_title"),r=t.entities.get("model"),n=t.entities.get("current_tool"),d=t.entities.get("cost"),c=t.entities.get("tokens_input"),a=t.entities.get("tokens_output"),l=t.entities.get("permission_pending"),p=t.entities.get("last_activity"),f=s?.attributes?.agent,m=s?.attributes?.current_agent;e.push(`${i}:${s?.state}:${o?.state}:${r?.state}:${n?.state}:${d?.state}:${c?.state}:${a?.state}:${l?.state}:${p?.state}:${f}:${m}`),l?.state==="on"&&e.push(`perm:${l.attributes?.permission_id}`)}for(let[i,t]of this._pendingPermissions)e.push(`pending:${i}:${t.permission_id}`);return e.join("|")}_findDeviceIdForPermission(e){for(let[i,t]of this._devices)if(t.sessionId===e.session_id)return i;return null}setConfig(e){this._config=e}async _initialize(){this._hass&&(this._initialized=!0,await this._fetchRegistries(),this._updateDevices(),await this._setupEventSubscriptions(),this._render())}async _setupEventSubscriptions(){this._hass&&(this._stateChangeUnsubscribe=await this._hass.connection.subscribeEvents(e=>{let i=e.data;this._updateDevices();let t=this._computeStateHash();t!==this._lastRenderHash&&(this._lastRenderHash=t,this._render())},"opencode_state_change"),this._historyResponseUnsubscribe=await this._hass.connection.subscribeEvents(e=>{let i=e.data;this._historySessionId&&i.session_id===this._historySessionId&&this._handleHistoryResponse(i.history)},"opencode_history_response"),this._agentsResponseUnsubscribe=await this._hass.connection.subscribeEvents(e=>{let i=e.data;this._historySessionId&&i.session_id===this._historySessionId&&(this._availableAgents=i.agents,this._agentsLoading=!1,this._render())},"opencode_agents_response"))}disconnectedCallback(){this._stateChangeUnsubscribe&&(this._stateChangeUnsubscribe(),this._stateChangeUnsubscribe=null),this._historyResponseUnsubscribe&&(this._historyResponseUnsubscribe(),this._historyResponseUnsubscribe=null),this._agentsResponseUnsubscribe&&(this._agentsResponseUnsubscribe(),this._agentsResponseUnsubscribe=null),this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null),this._stopSpeaking()}async _fetchRegistries(){if(this._hass)try{let e=await this._hass.callWS({type:"config/device_registry/list"});for(let t of e)t.manufacturer==="OpenCode"&&this._deviceRegistry.set(t.id,t);let i=await this._hass.callWS({type:"config/entity_registry/list"});for(let t of i)t.platform==="opencode"&&this._deviceRegistry.has(t.device_id)&&this._entityRegistry.set(t.entity_id,t)}catch(e){console.error("[opencode-card] Failed to fetch registries:",e)}}_updateDevices(){if(this._hass){this._devices.clear();for(let[e,i]of this._entityRegistry){let t=this._deviceRegistry.get(i.device_id);if(!t)continue;let s=this._hass.states[e];if(!s)continue;let o=this._devices.get(t.id);if(!o){let c=t.identifiers?.[0]?.[1]?.replace("opencode_","ses_")||"";o={deviceId:t.id,deviceName:t.name,sessionId:c,entities:new Map},this._devices.set(t.id,o)}let r=i.unique_id||"",n=t.identifiers?.[0]?.[1]||"",d="";if(n&&r.startsWith(n+"_"))d=r.slice(n.length+1);else{let c=["state","session_title","model","current_tool","tokens_input","tokens_output","cost","last_activity","permission_pending"];for(let a of c)if(r.endsWith("_"+a)){d=a;break}}d&&o.entities.set(d,s)}this._updatePendingPermissions()}}_updatePendingPermissions(){for(let[e,i]of this._devices){let t=i.entities.get("permission_pending"),s=i.entities.get("state");if(t?.state==="on"&&t.attributes){let o=t.attributes;o.permission_id&&o.permission_title&&this._pendingPermissions.set(e,{permission_id:o.permission_id,type:o.permission_type||"unknown",title:o.permission_title,session_id:i.sessionId,pattern:o.pattern,metadata:o.metadata})}else s?.state!=="waiting_permission"||t?.state==="off"?this._pendingPermissions.delete(e):s?.state==="waiting_permission"&&!this._pendingPermissions.has(e)&&this._pendingPermissions.set(e,{permission_id:"",type:"pending",title:"Permission Required",session_id:i.sessionId})}}_getPinnedDevice(){return this._config?.device&&this._devices.get(this._config.device)||null}_getPermissionDetails(e){let i=this._pendingPermissions.get(e.deviceId);if(i&&i.permission_id)return i;let t=e.entities.get("permission_pending");if(t?.state!=="on"||!t.attributes)return i||null;let s=t.attributes;return{permission_id:s.permission_id,type:s.permission_type,title:s.permission_title,session_id:e.sessionId,pattern:s.pattern,metadata:s.metadata}}_showPermission(e){this._activePermission=e,this._showPermissionModal=!0,this._render()}_hidePermissionModal(){this._showPermissionModal=!1,this._activePermission=null,this._render()}_selectDevice(e){this._selectedDeviceId=e,this._render()}_goBack(){this._selectedDeviceId=null,this._render()}_isPinned(){return!!this._config?.device}async _sendChatMessage(e){if(!(!this._hass||!this._historySessionId||!e.trim()))try{if(this._historyData){let t={id:`temp_${Date.now()}`,role:"user",timestamp:new Date().toISOString(),parts:[{type:"text",content:e.trim()}]};this._historyData.messages.push(t),this._render(),setTimeout(()=>{let s=this.querySelector(".history-body");s&&(s.scrollTop=s.scrollHeight)},0)}let i={session_id:this._historySessionId,text:e.trim()};this._selectedAgent&&(i.agent=this._selectedAgent),await this._hass.callService("opencode","send_prompt",i)}catch(i){console.error("[opencode-card] Failed to send chat message:",i)}}async _showHistory(e,i){this._historyDeviceId=e,this._historySessionId=i,this._showHistoryView=!0,this._historyLoading=!0,this._selectedAgent=null;let s=this._devices.get(e)?.entities.get("state");this._lastDeviceState=s?.state??"unknown",this._manageAutoRefresh(this._lastDeviceState),this._render(),this._fetchAgents();let o=this._loadHistoryFromCache(i);o?(this._historyData=o.data,this._historyLoading=!1,this._render(),await this._fetchHistorySince(o.lastFetched)):await this._fetchFullHistory()}async _fetchAgents(){if(!(!this._hass||!this._historySessionId)){this._agentsLoading=!0;try{await this._hass.callService("opencode","get_agents",{session_id:this._historySessionId,request_id:`agents_${Date.now()}`}),setTimeout(()=>{this._agentsLoading&&(this._agentsLoading=!1,this._render())},1e4)}catch(e){console.error("[opencode-card] Failed to fetch agents:",e),this._agentsLoading=!1}}}_hideHistoryView(){this._showHistoryView=!1,this._historyLoading=!1,this._historyData=null,this._historyDeviceId=null,this._historySessionId=null,this._historyVisibleCount=10,this._isAtBottom=!0,this._availableAgents=[],this._selectedAgent=null,this._agentsLoading=!1,this._lastDeviceState=null,this._autoRefreshEnabled=!0,this._autoRefreshInterval&&(clearInterval(this._autoRefreshInterval),this._autoRefreshInterval=null),this._render()}_scrollToBottom(){let e=this.querySelector(".history-body");if(e){e.scrollTop=e.scrollHeight,this._isAtBottom=!0;let i=this.querySelector(".scroll-to-bottom-btn");i&&i.classList.add("hidden")}}_loadHistoryFromCache(e){try{let i=localStorage.getItem(R(e));if(i)return JSON.parse(i)}catch(i){console.error("[opencode-card] Failed to load history from cache:",i)}return null}_saveHistoryToCache(e,i){try{let t={data:i,lastFetched:i.fetched_at};localStorage.setItem(R(e),JSON.stringify(t))}catch(t){console.error("[opencode-card] Failed to save history to cache:",t)}}async _fetchFullHistory(){if(!(!this._hass||!this._historySessionId))try{await this._hass.callService("opencode","get_history",{session_id:this._historySessionId,request_id:`req_${Date.now()}`})}catch(e){console.error("[opencode-card] Failed to request history:",e),this._historyLoading=!1,this._render()}}async _fetchHistorySince(e){if(!(!this._hass||!this._historySessionId))try{await this._hass.callService("opencode","get_history",{session_id:this._historySessionId,since:e,request_id:`req_${Date.now()}`})}catch(i){console.error("[opencode-card] Failed to request history update:",i)}}_handleHistoryResponse(e){if(!this._historySessionId)return;let i=e.since&&e.messages.length>0,t=!this._historyData;if(e.since&&this._historyData){let n=new Set(this._historyData.messages.map(c=>c.id)),d=e.messages.filter(c=>!n.has(c.id));this._historyData.messages.push(...d),this._historyData.fetched_at=e.fetched_at}else this._historyData=e;this._saveHistoryToCache(this._historySessionId,this._historyData),this._historyLoading=!1,this._render();let o=(this._historyDeviceId?this._devices.get(this._historyDeviceId):null)?.entities.get("state")?.state==="working";(t||i&&(this._isAtBottom||this._autoRefreshEnabled&&o))&&setTimeout(()=>this._scrollToBottom(),0)}_refreshHistory(){!this._historySessionId||!this._historyData||(this._historyLoading=!0,this._render(),this._fetchHistorySince(this._historyData.fetched_at))}async _respondToPermission(e){if(!this._hass||!this._activePermission)return;let{permission_id:i,session_id:t}=this._activePermission;if(!i){console.error("[opencode-card] Cannot respond: missing permission_id");return}try{await this._hass.callService("opencode","respond_permission",{session_id:t,permission_id:i,response:e}),this._hidePermissionModal()}catch(s){console.error("[opencode-card] Failed to send permission response:",s)}}_render(){let e=this._config?.title??"OpenCode Sessions",i=this._getPinnedDevice(),t=this._selectedDeviceId?this._devices.get(this._selectedDeviceId):null,s="";if(i)s=`
         <ha-card>
           <div class="card-content pinned">
-            ${this._renderDetailView(t,!1)}
+            ${this._renderDetailView(i,!1)}
           </div>
         </ha-card>
-      `;else if(i)s=`
+      `;else if(t)s=`
         <ha-card>
           <div class="card-content pinned">
-            ${this._renderDetailView(i,!0)}
+            ${this._renderDetailView(t,!0)}
           </div>
         </ha-card>
-      `;else{let n=this._sortMode==="activity"?"mdi:sort-clock-descending":"mdi:sort-alphabetical-ascending",a=this._sortMode==="activity"?"Sorted by latest activity":"Sorted by name";s=`
+      `;else{let o=this._sortMode==="activity"?"mdi:sort-clock-descending":"mdi:sort-alphabetical-ascending",r=this._sortMode==="activity"?"Sorted by latest activity":"Sorted by name";s=`
         <ha-card>
           <div class="card-header">
             <div class="name">${e}</div>
             ${this._devices.size>1?`
-              <button class="sort-toggle" title="${a}">
-                <ha-icon icon="${n}"></ha-icon>
+              <button class="sort-toggle" title="${r}">
+                <ha-icon icon="${o}"></ha-icon>
               </button>
             `:""}
           </div>
@@ -29,8 +29,11 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
       <style>
         ${this._getStyles()}
       </style>
-    `,this._attachEventListeners()}_attachEventListeners(){!this._isPinned()&&!this._selectedDeviceId&&this.querySelectorAll(".device-card[data-device-id]").forEach(t=>{t.addEventListener("click",i=>{if(i.target.closest(".permission-alert"))return;let s=t.dataset.deviceId;s&&this._selectDevice(s)})}),this.querySelector(".back-button")?.addEventListener("click",()=>{this._goBack()}),this.querySelector(".sort-toggle")?.addEventListener("click",()=>{this._sortMode=this._sortMode==="activity"?"name":"activity",this._render()}),this.querySelectorAll(".permission-alert[data-device-id]").forEach(t=>{t.addEventListener("click",i=>{i.stopPropagation();let s=t.dataset.deviceId;if(s){let n=this._devices.get(s);if(n){let a=this._getPermissionDetails(n);a?this._showPermission(a):this._showPermission({permission_id:"",type:"pending",title:"Permission Required",session_id:n.sessionId})}}})}),this.querySelector(".modal-backdrop:not(.history-modal-backdrop)")?.addEventListener("click",t=>{t.target.classList.contains("modal-backdrop")&&this._hidePermissionModal()}),this.querySelector(".modal-close:not(.history-close)")?.addEventListener("click",()=>{this._hidePermissionModal()}),this.querySelector(".btn-allow-once")?.addEventListener("click",()=>{this._respondToPermission("once")}),this.querySelector(".btn-allow-always")?.addEventListener("click",()=>{this._respondToPermission("always")}),this.querySelector(".btn-reject")?.addEventListener("click",()=>{this._respondToPermission("reject")}),this.querySelector(".open-chat-btn")?.addEventListener("click",()=>{let t=this.querySelector(".open-chat-btn"),i=t?.dataset.deviceId,s=t?.dataset.sessionId;i&&s&&this._showHistory(i,s)}),this.querySelector(".history-modal-backdrop")?.addEventListener("click",t=>{t.target.classList.contains("history-modal-backdrop")&&this._hideHistoryView()}),this.querySelector(".history-close")?.addEventListener("click",()=>{this._hideHistoryView()}),this.querySelector(".history-refresh-btn")?.addEventListener("click",()=>{this._refreshHistory()}),this.querySelector(".history-load-more")?.addEventListener("click",()=>{this._loadMoreHistory()});let e=this.querySelector(".history-body");e&&e.addEventListener("scroll",()=>{if(e.scrollTop<50&&!this._historyLoadingMore){let i=this._historyData?.messages.length||0;Math.max(0,i-this._historyVisibleCount)>0&&this._loadMoreHistory()}let t=e.scrollHeight-e.scrollTop-e.clientHeight<50;if(t!==this._isAtBottom){this._isAtBottom=t;let i=this.querySelector(".scroll-to-bottom-btn");i&&i.classList.toggle("hidden",t)}}),this.querySelector(".scroll-to-bottom-btn")?.addEventListener("click",()=>{this._scrollToBottom()}),this.querySelector(".chat-send-btn")?.addEventListener("click",()=>{let t=this.querySelector(".chat-input");t?.value.trim()&&(this._sendChatMessage(t.value.trim()),t.value="")}),this.querySelector(".chat-input")?.addEventListener("keydown",t=>{let i=t;if(i.key==="Enter"&&!i.shiftKey){t.preventDefault();let s=t.target;s?.value.trim()&&(this._sendChatMessage(s.value.trim()),s.value="")}}),this.querySelector(".agent-selector")?.addEventListener("change",t=>{let i=t.target;this._selectedAgent=i.value||null}),this.querySelectorAll(".inline-perm-btn").forEach(t=>{t.addEventListener("click",()=>{let i=t.dataset.response;i&&this._respondToInlinePermission(i)})}),this.querySelectorAll(".speak-btn").forEach(t=>{t.addEventListener("click",i=>{i.stopPropagation();let s=t.dataset.messageId;if(!s)return;if(this._speakingMessageId===s){this._stopSpeaking(),this._render();return}let n=this._historyData?.messages.find(a=>a.id===s);if(n){let a=this._extractTextFromMessage(n);a&&this._speakMessage(s,a)}})})}async _respondToInlinePermission(e){if(!this._hass||!this._historyDeviceId)return;let t=this._pendingPermissions.get(this._historyDeviceId);if(!t?.permission_id){console.error("[opencode-card] Cannot respond: missing permission details");return}try{await this._hass.callService("opencode","respond_permission",{session_id:t.session_id,permission_id:t.permission_id,response:e}),this._pendingPermissions.delete(this._historyDeviceId),setTimeout(()=>this._refreshHistory(),500)}catch(i){console.error("[opencode-card] Failed to respond to permission:",i)}}_speakMessage(e,t){if(this._speakingMessageId&&this._stopSpeaking(),!("speechSynthesis"in window)){console.warn("[opencode-card] Speech synthesis not supported in this browser");return}let i=new SpeechSynthesisUtterance(t);i.onstart=()=>{this._speakingMessageId=e,this._render()},i.onend=()=>{this._speakingMessageId=null,this._render()},i.onerror=()=>{this._speakingMessageId=null,this._render()},window.speechSynthesis.speak(i)}_stopSpeaking(){"speechSynthesis"in window&&window.speechSynthesis.cancel(),this._speakingMessageId=null}_extractTextFromMessage(e){return e.parts.filter(t=>t.type==="text"&&t.content).map(t=>t.content).join(`
-`)}_loadMoreHistory(){if(!this._historyData||this._historyLoadingMore)return;let e=this._historyData.messages.length;Math.max(0,e-this._historyVisibleCount)<=0||(this._historyLoadingMore=!0,this._render(),setTimeout(()=>{this._historyVisibleCount+=_.HISTORY_PAGE_SIZE,this._historyLoadingMore=!1;let s=this.querySelector(".history-body")?.scrollHeight||0;this._render();let n=this.querySelector(".history-body");if(n&&s>0){let r=n.scrollHeight-s;n.scrollTop=r}},100))}_renderPermissionModal(e){let t=!!e.permission_id,i=t?"":"disabled";return`
+    `,this._attachEventListeners()}_attachEventListeners(){!this._isPinned()&&!this._selectedDeviceId&&this.querySelectorAll(".device-card[data-device-id]").forEach(t=>{t.addEventListener("click",s=>{if(s.target.closest(".permission-alert"))return;let o=t.dataset.deviceId;o&&this._selectDevice(o)})}),this.querySelector(".back-button")?.addEventListener("click",()=>{this._goBack()}),this.querySelector(".sort-toggle")?.addEventListener("click",()=>{this._sortMode=this._sortMode==="activity"?"name":"activity",this._render()}),this.querySelectorAll(".permission-alert[data-device-id]").forEach(t=>{t.addEventListener("click",s=>{s.stopPropagation();let o=t.dataset.deviceId;if(o){let r=this._devices.get(o);if(r){let n=this._getPermissionDetails(r);n?this._showPermission(n):this._showPermission({permission_id:"",type:"pending",title:"Permission Required",session_id:r.sessionId})}}})}),this.querySelector(".modal-backdrop:not(.history-modal-backdrop)")?.addEventListener("click",t=>{t.target.classList.contains("modal-backdrop")&&this._hidePermissionModal()}),this.querySelector(".modal-close:not(.history-close)")?.addEventListener("click",()=>{this._hidePermissionModal()}),this.querySelector(".btn-allow-once")?.addEventListener("click",()=>{this._respondToPermission("once")}),this.querySelector(".btn-allow-always")?.addEventListener("click",()=>{this._respondToPermission("always")}),this.querySelector(".btn-reject")?.addEventListener("click",()=>{this._respondToPermission("reject")}),this.querySelector(".open-chat-btn")?.addEventListener("click",()=>{let t=this.querySelector(".open-chat-btn"),s=t?.dataset.deviceId,o=t?.dataset.sessionId;s&&o&&this._showHistory(s,o)}),this.querySelector(".history-modal-backdrop")?.addEventListener("click",t=>{t.target.classList.contains("history-modal-backdrop")&&this._hideHistoryView()}),this.querySelector(".history-close")?.addEventListener("click",()=>{this._hideHistoryView()}),this.querySelector(".history-refresh-btn")?.addEventListener("click",()=>{this._refreshHistory()}),this.querySelector(".auto-refresh-toggle")?.addEventListener("click",()=>{this._toggleAutoRefresh()}),this.querySelector(".history-load-more")?.addEventListener("click",()=>{this._loadMoreHistory()});let e=this.querySelector(".history-body");e&&e.addEventListener("scroll",()=>{if(e.scrollTop<50&&!this._historyLoadingMore){let s=this._historyData?.messages.length||0;Math.max(0,s-this._historyVisibleCount)>0&&this._loadMoreHistory()}let t=e.scrollHeight-e.scrollTop-e.clientHeight<50;if(t!==this._isAtBottom){this._isAtBottom=t;let s=this.querySelector(".scroll-to-bottom-btn");s&&s.classList.toggle("hidden",t)}}),this.querySelector(".scroll-to-bottom-btn")?.addEventListener("click",()=>{this._scrollToBottom()}),this.querySelector(".chat-send-btn")?.addEventListener("click",()=>{let t=this.querySelector(".chat-input");t?.value.trim()&&(this._sendChatMessage(t.value.trim()),t.value="")}),this.querySelector(".chat-input")?.addEventListener("keydown",t=>{let s=t;if(s.key==="Enter"&&!s.shiftKey){t.preventDefault();let o=t.target;o?.value.trim()&&(this._sendChatMessage(o.value.trim()),o.value="")}}),this.querySelector(".agent-selector")?.addEventListener("change",t=>{let s=t.target;this._selectedAgent=s.value||null}),this.querySelectorAll(".inline-perm-btn").forEach(t=>{t.addEventListener("click",()=>{let s=t.dataset.response;s&&this._respondToInlinePermission(s)})}),this.querySelectorAll(".speak-btn").forEach(t=>{t.addEventListener("click",s=>{s.stopPropagation();let o=t.dataset.messageId;if(!o)return;if(this._speakingMessageId===o){this._stopSpeaking(),this._render();return}let r=this._historyData?.messages.find(n=>n.id===o);if(r){let n=this._extractTextFromMessage(r);n&&this._speakMessage(o,n)}})}),this.querySelectorAll(".copy-btn").forEach(t=>{t.addEventListener("click",s=>{s.stopPropagation();let o=t.dataset.messageId;if(!o)return;let r=this._historyData?.messages.find(n=>n.id===o);if(r){let n=this._getRawMarkdownFromMessage(r);this._copyToClipboard(n,t)}})});let i=this.querySelector(".history-body");i&&i.addEventListener("mouseup",()=>{setTimeout(()=>this._handleTextSelection(),10)})}async _respondToInlinePermission(e){if(!this._hass||!this._historyDeviceId)return;let i=this._pendingPermissions.get(this._historyDeviceId);if(!i?.permission_id){console.error("[opencode-card] Cannot respond: missing permission details");return}try{await this._hass.callService("opencode","respond_permission",{session_id:i.session_id,permission_id:i.permission_id,response:e}),this._pendingPermissions.delete(this._historyDeviceId),setTimeout(()=>this._refreshHistory(),500)}catch(t){console.error("[opencode-card] Failed to respond to permission:",t)}}_speakMessage(e,i){if(this._speakingMessageId&&this._stopSpeaking(),!("speechSynthesis"in window)){console.warn("[opencode-card] Speech synthesis not supported in this browser");return}let t=new SpeechSynthesisUtterance(i);t.onstart=()=>{this._speakingMessageId=e,this._render()},t.onend=()=>{this._speakingMessageId=null,this._render()},t.onerror=()=>{this._speakingMessageId=null,this._render()},window.speechSynthesis.speak(t)}_stopSpeaking(){"speechSynthesis"in window&&window.speechSynthesis.cancel(),this._speakingMessageId=null}_extractTextFromMessage(e){return e.parts.filter(i=>i.type==="text"&&i.content).map(i=>i.content).join(`
+`)}async _copyToClipboard(e,i){try{if(await navigator.clipboard.writeText(e),i){let t=i.querySelector("ha-icon"),s=t?.getAttribute("icon");t&&s&&(t.setAttribute("icon","mdi:check"),i.classList.add("copied"),setTimeout(()=>{t.setAttribute("icon",s),i.classList.remove("copied")},1500))}return!0}catch(t){return console.error("[opencode-card] Failed to copy to clipboard:",t),!1}}_getRawMarkdownFromMessage(e){return e.parts.map(i=>{if(i.type==="text"&&i.content)return i.content;if(i.type==="tool_call"){let t=`**Tool: ${i.tool_name||"unknown"}**
+`;return i.tool_args&&(t+="```json\n"+JSON.stringify(i.tool_args,null,2)+"\n```\n"),i.tool_output&&(t+="**Output:**\n```\n"+i.tool_output+"\n```\n"),i.tool_error&&(t+="**Error:**\n```\n"+i.tool_error+"\n```\n"),t}else if(i.type==="image")return`[Image: ${i.content||"embedded"}]`;return""}).filter(Boolean).join(`
+
+`)}_handleTextSelection(){let e=window.getSelection();if(!e||e.isCollapsed)return;let i=e.toString().trim();if(!i)return;let t=this.querySelector(".history-body");if(!t)return;let s=e.anchorNode,o=e.focusNode;!s||!o||!t.contains(s)||!t.contains(o)||this._copyToClipboard(i)}_loadMoreHistory(){if(!this._historyData||this._historyLoadingMore)return;let e=this._historyData.messages.length;Math.max(0,e-this._historyVisibleCount)<=0||(this._historyLoadingMore=!0,this._render(),setTimeout(()=>{this._historyVisibleCount+=_.HISTORY_PAGE_SIZE,this._historyLoadingMore=!1;let s=this.querySelector(".history-body")?.scrollHeight||0;this._render();let o=this.querySelector(".history-body");if(o&&s>0){let n=o.scrollHeight-s;o.scrollTop=n}},100))}_renderPermissionModal(e){let i=!!e.permission_id,t=i?"":"disabled";return`
       <div class="modal-backdrop">
         <div class="modal">
           <div class="modal-header">
@@ -45,7 +48,7 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
               <div class="permission-main-title">${e.title}</div>
               <div class="permission-type-badge">${e.type}</div>
             </div>
-            ${t?"":`
+            ${i?"":`
               <div class="permission-section">
                 <div class="permission-loading">
                   <ha-icon icon="mdi:loading" class="spinning"></ha-icon>
@@ -63,10 +66,10 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
               <div class="permission-section">
                 <div class="section-label">Details</div>
                 <div class="metadata-list">
-                  ${Object.entries(e.metadata).map(([s,n])=>`
+                  ${Object.entries(e.metadata).map(([s,o])=>`
                     <div class="metadata-item">
                       <span class="metadata-key">${s}:</span>
-                      <span class="metadata-value">${typeof n=="object"?JSON.stringify(n):String(n)}</span>
+                      <span class="metadata-value">${typeof o=="object"?JSON.stringify(o):String(o)}</span>
                     </div>
                   `).join("")}
                 </div>
@@ -74,29 +77,32 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
             `:""}
           </div>
           <div class="modal-actions">
-            <button class="btn btn-reject" ${i}>
+            <button class="btn btn-reject" ${t}>
               <ha-icon icon="mdi:close-circle"></ha-icon>
               Reject
             </button>
-            <button class="btn btn-allow-once" ${i}>
+            <button class="btn btn-allow-once" ${t}>
               <ha-icon icon="mdi:check"></ha-icon>
               Allow Once
             </button>
-            <button class="btn btn-allow-always" ${i}>
+            <button class="btn btn-allow-always" ${t}>
               <ha-icon icon="mdi:check-all"></ha-icon>
               Always Allow
             </button>
           </div>
         </div>
       </div>
-    `}_renderHistoryView(){let e=this._historyData?.fetched_at?new Date(this._historyData.fetched_at).toLocaleString():"",n=((this._historyDeviceId?this._devices.get(this._historyDeviceId):null)?.entities.get("state")?.state??"unknown")==="working";return`
+    `}_renderHistoryView(){let e=this._historyData?.fetched_at?new Date(this._historyData.fetched_at).toLocaleString():"",o=((this._historyDeviceId?this._devices.get(this._historyDeviceId):null)?.entities.get("state")?.state??"unknown")==="working",r=this._autoRefreshEnabled?"mdi:sync":"mdi:sync-off",n=this._autoRefreshEnabled?"Auto-refresh ON (click to disable)":"Auto-refresh OFF (click to enable)";return`
       <div class="modal-backdrop history-modal-backdrop">
         <div class="modal history-modal chat-modal">
           <div class="modal-header history-header">
             <ha-icon icon="mdi:chat"></ha-icon>
             <span class="modal-title">${this._historyData?.session_title||"Chat"}</span>
             <div class="history-header-actions">
-              ${n?'<span class="working-indicator"><ha-icon icon="mdi:loading" class="spinning"></ha-icon></span>':""}
+              ${o?'<span class="working-indicator"><ha-icon icon="mdi:loading" class="spinning"></ha-icon></span>':""}
+              <button class="auto-refresh-toggle ${this._autoRefreshEnabled?"enabled":""}" title="${n}">
+                <ha-icon icon="${r}"></ha-icon>
+              </button>
               <button class="history-refresh-btn" title="Refresh history" ${this._historyLoading?"disabled":""}>
                 <ha-icon icon="mdi:refresh" class="${this._historyLoading?"spinning":""}"></ha-icon>
               </button>
@@ -127,10 +133,10 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
         <div class="agent-selector loading">
           <ha-icon icon="mdi:loading" class="spinning"></ha-icon>
         </div>
-      `;if(this._availableAgents.length===0)return"";let e=this._availableAgents.filter(i=>i.mode==="primary"||i.mode==="all");if(e.length===0)return"";let t=e.map(i=>{let s=this._selectedAgent===i.name?"selected":"",n=i.description?` - ${i.description}`:"";return`<option value="${i.name}" ${s}>${i.name}${n}</option>`}).join("");return`
+      `;if(this._availableAgents.length===0)return"";let e=this._availableAgents.filter(t=>t.mode==="primary"||t.mode==="all");if(e.length===0)return"";let i=e.map(t=>{let s=this._selectedAgent===t.name?"selected":"",o=t.description?` - ${t.description}`:"";return`<option value="${t.name}" ${s}>${t.name}${o}</option>`}).join("");return`
       <select class="agent-selector" title="Select agent">
         <option value="" ${this._selectedAgent?"":"selected"}>Default Agent</option>
-        ${t}
+        ${i}
       </select>
     `}_renderHistoryLoading(){return`
       <div class="history-loading">
@@ -142,12 +148,12 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
           <ha-icon icon="mdi:message-off"></ha-icon>
           <span>No messages in this session</span>
         </div>
-      `;let e=this._historyData.messages.length,t=Math.max(0,e-this._historyVisibleCount),i=this._historyData.messages.slice(t),s=t>0,n="";if(s){let a=t;n+=`
+      `;let e=this._historyData.messages.length,i=Math.max(0,e-this._historyVisibleCount),t=this._historyData.messages.slice(i),s=i>0,o="";if(s){let r=i;o+=`
         <div class="history-load-more" data-action="load-more">
           <ha-icon icon="${this._historyLoadingMore?"mdi:loading":"mdi:chevron-up"}" class="${this._historyLoadingMore?"spinning":""}"></ha-icon>
-          <span>${this._historyLoadingMore?"Loading...":`Load ${Math.min(a,_.HISTORY_PAGE_SIZE)} more (${a} remaining)`}</span>
+          <span>${this._historyLoadingMore?"Loading...":`Load ${Math.min(r,_.HISTORY_PAGE_SIZE)} more (${r} remaining)`}</span>
         </div>
-      `}return n+=i.map(a=>this._renderHistoryMessage(a)).join(""),n+=this._renderInlinePermission(),n}_renderInlinePermission(){if(!this._historyDeviceId)return"";let e=this._devices.get(this._historyDeviceId);if(!e||(e.entities.get("state")?.state??"unknown")!=="waiting_permission")return"";let s=this._pendingPermissions.get(this._historyDeviceId),n=s?.permission_id;return`
+      `}return o+=t.map(r=>this._renderHistoryMessage(r)).join(""),o+=this._renderInlinePermission(),o}_renderInlinePermission(){if(!this._historyDeviceId)return"";let e=this._devices.get(this._historyDeviceId);if(!e||(e.entities.get("state")?.state??"unknown")!=="waiting_permission")return"";let s=this._pendingPermissions.get(this._historyDeviceId),o=s?.permission_id;return`
       <div class="inline-permission">
         <div class="inline-permission-header">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
@@ -165,16 +171,16 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
             <div class="inline-permission-section">
               <div class="inline-permission-label">Details</div>
               <div class="inline-permission-metadata">
-                ${Object.entries(s.metadata).map(([a,r])=>`
+                ${Object.entries(s.metadata).map(([r,n])=>`
                   <div class="inline-metadata-item">
-                    <span class="inline-metadata-key">${a}:</span>
-                    <span class="inline-metadata-value">${typeof r=="object"?JSON.stringify(r):String(r)}</span>
+                    <span class="inline-metadata-key">${r}:</span>
+                    <span class="inline-metadata-value">${typeof n=="object"?JSON.stringify(n):String(n)}</span>
                   </div>
                 `).join("")}
               </div>
             </div>
           `:""}
-          ${n?"":`
+          ${o?"":`
             <div class="inline-permission-loading">
               <ha-icon icon="mdi:loading" class="spinning"></ha-icon>
               <span>Loading details...</span>
@@ -182,57 +188,64 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
           `}
         </div>
         <div class="inline-permission-actions">
-          <button class="inline-perm-btn reject" data-response="reject" ${n?"":"disabled"}>
+          <button class="inline-perm-btn reject" data-response="reject" ${o?"":"disabled"}>
             <ha-icon icon="mdi:close-circle"></ha-icon>
             Reject
           </button>
-          <button class="inline-perm-btn allow-once" data-response="once" ${n?"":"disabled"}>
+          <button class="inline-perm-btn allow-once" data-response="once" ${o?"":"disabled"}>
             <ha-icon icon="mdi:check"></ha-icon>
             Allow Once
           </button>
-          <button class="inline-perm-btn allow-always" data-response="always" ${n?"":"disabled"}>
+          <button class="inline-perm-btn allow-always" data-response="always" ${o?"":"disabled"}>
             <ha-icon icon="mdi:check-all"></ha-icon>
             Always
           </button>
         </div>
       </div>
-    `}_renderHistoryMessage(e){let t=e.role==="user",i=L(e.timestamp),s=e.parts.map(o=>{if(o.type==="text"&&o.content)return`<div class="history-text">${this._escapeHtml(o.content)}</div>`;if(o.type==="tool_call"){let c=o.tool_output||o.tool_error;return`
+    `}_renderHistoryMessage(e){let i=e.role==="user",t=L(e.timestamp),s=e.parts.map(a=>{if(a.type==="text"&&a.content)return`<div class="history-text">${this._escapeHtml(a.content)}</div>`;if(a.type==="tool_call"){let l=a.tool_output||a.tool_error;return`
           <div class="history-tool">
             <div class="tool-header">
               <ha-icon icon="mdi:tools"></ha-icon>
-              <span class="tool-name">${o.tool_name||"unknown"}</span>
+              <span class="tool-name">${a.tool_name||"unknown"}</span>
             </div>
-            ${o.tool_args?`<pre class="tool-args">${this._escapeHtml(JSON.stringify(o.tool_args,null,2))}</pre>`:""}
-            ${c?`
-              <div class="tool-result ${o.tool_error?"error":""}">
-                <span class="tool-result-label">${o.tool_error?"Error:":"Output:"}</span>
-                <pre class="tool-output">${this._escapeHtml(o.tool_error||o.tool_output||"")}</pre>
+            ${a.tool_args?`<pre class="tool-args">${this._escapeHtml(JSON.stringify(a.tool_args,null,2))}</pre>`:""}
+            ${l?`
+              <div class="tool-result ${a.tool_error?"error":""}">
+                <span class="tool-result-label">${a.tool_error?"Error:":"Output:"}</span>
+                <pre class="tool-output">${this._escapeHtml(a.tool_error||a.tool_output||"")}</pre>
               </div>
             `:""}
           </div>
-        `}else if(o.type==="image")return`<div class="history-image"><ha-icon icon="mdi:image"></ha-icon> ${o.content||"Image"}</div>`;return""}).join(""),n="";if(!t&&(e.model||e.tokens_input||e.cost)){let o=[];e.model&&o.push(e.model),(e.tokens_input||e.tokens_output)&&o.push(`${e.tokens_input||0}/${e.tokens_output||0} tokens`),e.cost&&o.push(`$${e.cost.toFixed(4)}`),n=`<div class="message-meta">${o.join(" \xB7 ")}</div>`}let a=e.parts.some(o=>o.type==="text"&&o.content),r=this._speakingMessageId===e.id,d=!t&&a?`
-      <button class="speak-btn ${r?"speaking":""}" data-message-id="${e.id}" title="${r?"Stop speaking":"Read aloud"}">
-        <ha-icon icon="${r?"mdi:stop":"mdi:volume-high"}"></ha-icon>
+        `}else if(a.type==="image")return`<div class="history-image"><ha-icon icon="mdi:image"></ha-icon> ${a.content||"Image"}</div>`;return""}).join(""),o="";if(!i&&(e.model||e.tokens_input||e.cost)){let a=[];e.model&&a.push(e.model),(e.tokens_input||e.tokens_output)&&a.push(`${e.tokens_input||0}/${e.tokens_output||0} tokens`),e.cost&&a.push(`$${e.cost.toFixed(4)}`),o=`<div class="message-meta">${a.join(" \xB7 ")}</div>`}let r=e.parts.some(a=>a.type==="text"&&a.content),n=this._speakingMessageId===e.id,d=!i&&r?`
+      <button class="speak-btn ${n?"speaking":""}" data-message-id="${e.id}" title="${n?"Stop speaking":"Read aloud"}">
+        <ha-icon icon="${n?"mdi:stop":"mdi:volume-high"}"></ha-icon>
       </button>
-    `:"";return`
-      <div class="history-message ${t?"user":"assistant"}">
+    `:"",c=`
+      <button class="copy-btn" data-message-id="${e.id}" title="Copy as Markdown">
+        <ha-icon icon="mdi:content-copy"></ha-icon>
+      </button>
+    `;return`
+      <div class="history-message ${i?"user":"assistant"}" data-message-id="${e.id}">
         <div class="message-header">
-          <ha-icon icon="${t?"mdi:account":"mdi:robot"}"></ha-icon>
-          <span class="message-role">${t?"You":"Assistant"}</span>
-          <span class="message-time" title="${i.tooltip}">${i.display}</span>
-          ${d}
+          <ha-icon icon="${i?"mdi:account":"mdi:robot"}"></ha-icon>
+          <span class="message-role">${i?"You":"Assistant"}</span>
+          <span class="message-time" title="${t.tooltip}">${t.display}</span>
+          <div class="message-actions">
+            ${c}
+            ${d}
+          </div>
         </div>
         <div class="message-content">
           ${s}
         </div>
-        ${n}
+        ${o}
       </div>
-    `}_escapeHtml(e){let t=document.createElement("div");return t.textContent=e,t.innerHTML}_renderEmpty(){return`
+    `}_escapeHtml(e){let i=document.createElement("div");return i.textContent=e,i.innerHTML}_renderEmpty(){return`
       <div class="empty-state">
         <ha-icon icon="mdi:code-braces-box"></ha-icon>
         <p>No OpenCode sessions found</p>
       </div>
-    `}_renderDevices(){let e=Array.from(this._devices.values());return this._sortMode==="activity"?e.sort((t,i)=>{let s=t.entities.get("last_activity")?.state??"",n=i.entities.get("last_activity")?.state??"";return!s&&!n?0:s?n?new Date(n).getTime()-new Date(s).getTime():-1:1}):e.sort((t,i)=>{let s=t.deviceName.replace("OpenCode - ","").toLowerCase(),n=i.deviceName.replace("OpenCode - ","").toLowerCase();return s.localeCompare(n)}),e.map(t=>this._renderDevice(t)).join("")}_renderDetailView(e,t){let i=e.entities.get("state"),s=e.entities.get("session_title"),n=e.entities.get("model"),a=e.entities.get("current_tool"),r=e.entities.get("cost"),d=e.entities.get("tokens_input"),o=e.entities.get("tokens_output"),c=e.entities.get("last_activity"),l=i?.state??"unknown",p=$[l]||$.unknown,f=s?.state??"Unknown Session",m=n?.state??"unknown",b=a?.state??"none",I=r?.state??"0",D=d?.state??"0",x=o?.state??"0",u=c?.state??"",v=i?.attributes?.agent||null,h=i?.attributes?.current_agent||null,y=i?.attributes?.hostname||null,k="";u&&(k=new Date(u).toLocaleTimeString());let w=this._getPermissionDetails(e),E="";if(w){let M=!!w.permission_id;E=`
+    `}_renderDevices(){let e=Array.from(this._devices.values());return this._sortMode==="activity"?e.sort((i,t)=>{let s=i.entities.get("last_activity")?.state??"",o=t.entities.get("last_activity")?.state??"";return!s&&!o?0:s?o?new Date(o).getTime()-new Date(s).getTime():-1:1}):e.sort((i,t)=>{let s=i.deviceName.replace("OpenCode - ","").toLowerCase(),o=t.deviceName.replace("OpenCode - ","").toLowerCase();return s.localeCompare(o)}),e.map(i=>this._renderDevice(i)).join("")}_renderDetailView(e,i){let t=e.entities.get("state"),s=e.entities.get("session_title"),o=e.entities.get("model"),r=e.entities.get("current_tool"),n=e.entities.get("cost"),d=e.entities.get("tokens_input"),c=e.entities.get("tokens_output"),a=e.entities.get("last_activity"),l=t?.state??"unknown",p=$[l]||$.unknown,f=s?.state??"Unknown Session",m=o?.state??"unknown",b=r?.state??"none",I=n?.state??"0",E=d?.state??"0",x=c?.state??"0",u=a?.state??"",v=t?.attributes?.agent||null,h=t?.attributes?.current_agent||null,y=t?.attributes?.hostname||null,k="";u&&(k=new Date(u).toLocaleTimeString());let w=this._getPermissionDetails(e),D="";if(w){let M=!!w.permission_id;D=`
         <div class="permission-alert pinned clickable" data-device-id="${e.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
           <div class="permission-details">
@@ -241,7 +254,7 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
           </div>
           <ha-icon icon="mdi:chevron-right" class="permission-chevron"></ha-icon>
         </div>
-      `}else l==="waiting_permission"&&(E=`
+      `}else l==="waiting_permission"&&(D=`
         <div class="permission-alert pinned clickable" data-device-id="${e.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
           <div class="permission-details">
@@ -252,7 +265,7 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
         </div>
       `);return`
       <div class="detail-view">
-        ${t?`
+        ${i?`
       <button class="back-button" data-action="back">
         <ha-icon icon="mdi:arrow-left"></ha-icon>
         <span>Back</span>
@@ -274,7 +287,7 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
           <span class="session-title">${f}</span>
         </div>
 
-        ${E}
+        ${D}
 
         <div class="detail-info">
           <div class="detail-row">
@@ -311,7 +324,7 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
           </div>
           <div class="stat">
             <ha-icon icon="mdi:arrow-right-bold"></ha-icon>
-            <span class="stat-value">${Number(D).toLocaleString()}</span>
+            <span class="stat-value">${Number(E).toLocaleString()}</span>
             <span class="stat-label">In</span>
           </div>
           <div class="stat">
@@ -332,7 +345,7 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
           <code class="session-id">${e.sessionId}</code>
         </div>
       </div>
-    `}_renderDevice(e){let t=e.entities.get("state"),i=e.entities.get("session_title"),s=e.entities.get("model"),n=e.entities.get("current_tool"),a=e.entities.get("cost"),r=e.entities.get("tokens_input"),d=e.entities.get("tokens_output"),o=e.entities.get("last_activity"),c=t?.state??"unknown",l=$[c]||$.unknown,p=i?.state??"Unknown Session",f=s?.state??"unknown",m=n?.state??"none",b=a?.state??"0",I=r?.state??"0",D=d?.state??"0",x=o?.state??"",u=x?L(x):null,v=t?.attributes?.current_agent||null,h=this._getPermissionDetails(e),y="";if(h){let k=!!h.permission_id;y=`
+    `}_renderDevice(e){let i=e.entities.get("state"),t=e.entities.get("session_title"),s=e.entities.get("model"),o=e.entities.get("current_tool"),r=e.entities.get("cost"),n=e.entities.get("tokens_input"),d=e.entities.get("tokens_output"),c=e.entities.get("last_activity"),a=i?.state??"unknown",l=$[a]||$.unknown,p=t?.state??"Unknown Session",f=s?.state??"unknown",m=o?.state??"none",b=r?.state??"0",I=n?.state??"0",E=d?.state??"0",x=c?.state??"",u=x?L(x):null,v=i?.attributes?.current_agent||null,h=this._getPermissionDetails(e),y="";if(h){let k=!!h.permission_id;y=`
         <div class="permission-alert clickable" data-device-id="${e.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
           <div class="permission-details">
@@ -341,7 +354,7 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
           </div>
           <ha-icon icon="mdi:chevron-right" class="permission-chevron"></ha-icon>
         </div>
-      `}else c==="waiting_permission"&&(y=`
+      `}else a==="waiting_permission"&&(y=`
         <div class="permission-alert clickable" data-device-id="${e.deviceId}">
           <ha-icon icon="mdi:shield-alert"></ha-icon>
           <div class="permission-details">
@@ -353,7 +366,7 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
       `);return`
       <div class="device-card clickable" data-device-id="${e.deviceId}">
         <div class="device-header">
-          <div class="device-status ${c==="working"?"pulse":""}">
+          <div class="device-status ${a==="working"?"pulse":""}">
             <ha-icon icon="${l.icon}" style="color: ${l.color}"></ha-icon>
             <span class="status-label" style="color: ${l.color}">${l.label}</span>
           </div>
@@ -395,7 +408,7 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
             <ha-icon icon="mdi:arrow-right-bold"></ha-icon>
             <span class="stat-value">${I}</span>
             <ha-icon icon="mdi:arrow-left-bold"></ha-icon>
-            <span class="stat-value">${D}</span>
+            <span class="stat-value">${E}</span>
           </div>
         </div>
 
@@ -1009,6 +1022,27 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
       .history-refresh-btn ha-icon {
         --mdc-icon-size: 20px;
       }
+      .auto-refresh-toggle {
+        background: none;
+        border: none;
+        padding: 8px;
+        cursor: pointer;
+        border-radius: 50%;
+        color: var(--secondary-text-color);
+        transition: background 0.2s, color 0.2s;
+        opacity: 0.6;
+      }
+      .auto-refresh-toggle:hover {
+        background: var(--secondary-background-color);
+        opacity: 1;
+      }
+      .auto-refresh-toggle.enabled {
+        color: var(--primary-color);
+        opacity: 1;
+      }
+      .auto-refresh-toggle ha-icon {
+        --mdc-icon-size: 20px;
+      }
       .history-body-container {
         position: relative;
         flex: 1;
@@ -1018,6 +1052,12 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
         height: 400px;
         overflow-y: auto;
         padding: 16px;
+        user-select: text;
+        -webkit-user-select: text;
+      }
+      .history-body ::selection {
+        background: var(--primary-color);
+        color: var(--text-primary-color, #fff);
       }
       .scroll-to-bottom-btn {
         position: absolute;
@@ -1108,6 +1148,36 @@ function P(S){return`opencode_history_${S}`}function L(S){let g=new Date(S);if(i
       .message-time {
         color: var(--secondary-text-color);
         margin-left: auto;
+      }
+      .message-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .copy-btn {
+        background: none;
+        border: none;
+        padding: 4px;
+        cursor: pointer;
+        border-radius: 50%;
+        color: var(--secondary-text-color);
+        transition: background 0.2s, color 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        opacity: 0.6;
+      }
+      .copy-btn:hover {
+        background: var(--divider-color);
+        color: var(--primary-text-color);
+        opacity: 1;
+      }
+      .copy-btn.copied {
+        color: #4caf50;
+        opacity: 1;
+      }
+      .copy-btn ha-icon {
+        --mdc-icon-size: 16px;
       }
       .speak-btn {
         background: none;
