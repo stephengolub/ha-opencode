@@ -49,7 +49,7 @@ jobs:
         run: npm ci
       
       - name: Type check
-        run: npx tsc --noEmit --skipLibCheck frontend/src/opencode-card.ts
+        run: npx tsc --noEmit
 
   build-frontend:
     name: Build Frontend

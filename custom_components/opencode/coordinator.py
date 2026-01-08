@@ -11,7 +11,7 @@ from typing import Any, Callable
 
 from homeassistant.components.websocket_api import ActiveConnection
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import device_registry as dr
 
 from .const import (
     DOMAIN,
@@ -307,7 +307,6 @@ class OpenCodeCoordinator:
     def remove_session(self, session_id: str) -> None:
         """Remove a session."""
         if session_id in self.sessions:
-            session = self.sessions[session_id]
             del self.sessions[session_id]
             _LOGGER.info("Removed session: %s", session_id)
 
@@ -412,9 +411,9 @@ class OpenCodeCoordinator:
 
     def _notify_update(self) -> None:
         """Notify all registered callbacks of an update."""
-        for callback in self._update_callbacks:
+        for update_callback in self._update_callbacks:
             try:
-                callback()
+                update_callback()
             except Exception as err:
                 _LOGGER.error("Error in update callback: %s", err)
 
