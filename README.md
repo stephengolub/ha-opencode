@@ -11,6 +11,7 @@ A native Home Assistant integration for [OpenCode](https://opencode.ai), the AI 
 - **Send Prompts**: Send prompts to OpenCode from automations or the Lovelace card
 - **Auto-reconnect**: Persistent connection with automatic reconnection
 - **Lovelace Card**: Beautiful card for viewing and interacting with sessions
+- **Blueprints**: Ready-to-use automations for mobile notifications
 
 ## Requirements
 
@@ -32,7 +33,7 @@ A native Home Assistant integration for [OpenCode](https://opencode.ai), the AI 
 
 1. Download the [latest release](https://github.com/stephengolub/ha-opencode/releases)
 2. Extract `custom_components/opencode` to your Home Assistant `config/custom_components/` folder
-3. Copy `opencode-card.js` to `config/www/`
+3. Copy `frontend/dist/opencode-card.js` to `config/www/`
 4. Restart Home Assistant
 
 ## Setup
@@ -79,6 +80,17 @@ lovelace:
       type: module
 ```
 
+### 4. Install Blueprints (Optional)
+
+Copy the blueprints to your Home Assistant config:
+
+```bash
+mkdir -p config/blueprints/automation/opencode
+cp blueprints/automation/*.yaml config/blueprints/automation/opencode/
+```
+
+Then reload automations in Developer Tools > YAML > Reload Automations.
+
 ## Entities
 
 The integration creates these entities for each OpenCode session:
@@ -121,6 +133,60 @@ data:
   response: once  # once, always, or reject
 ```
 
+### `opencode.get_history`
+
+Request session history (response sent via event).
+
+```yaml
+service: opencode.get_history
+data:
+  session_id: ses_abc123
+```
+
+### `opencode.get_agents`
+
+Request available agents (response sent via event).
+
+```yaml
+service: opencode.get_agents
+data:
+  session_id: ses_abc123
+```
+
+## Blueprints
+
+The integration includes ready-to-use blueprints for common automations.
+
+### State Notifications
+
+**File:** `blueprints/automation/opencode_state_notifications.yaml`
+
+Sends mobile notifications when:
+- A task completes (idle after working)
+- Permission is required (with approve/reject buttons)
+- An error occurs
+
+**Features:**
+- Configurable notification service
+- Toggle notifications by type
+- Detailed permission info (type, title, pattern)
+- Android and iOS support
+
+### Permission Response Handler
+
+**File:** `blueprints/automation/opencode_permission_response.yaml`
+
+Handles taps on notification action buttons:
+- Extracts session and permission IDs
+- Calls `opencode.respond_permission` service
+- Works with both iOS and Android
+
+**Usage:**
+1. Install both blueprints
+2. Create an automation from "State Notifications" blueprint
+3. Create an automation from "Permission Response" blueprint
+4. Configure your mobile notification service
+
 ## Lovelace Card
 
 Add the card to a dashboard:
@@ -151,43 +217,32 @@ type: custom:opencode-card
 device: opencode_abc123def456
 ```
 
-## Automations
+## Events
 
-### Notify when task completes
+The integration fires these events for automations:
+
+| Event | Description |
+|-------|-------------|
+| `opencode_state_change` | Session state changed |
+| `opencode_permission_request` | New permission request (detailed info) |
+| `opencode_history_response` | History response received |
+| `opencode_agents_response` | Agents response received |
+
+### Example: Custom Permission Automation
 
 ```yaml
 automation:
-  - alias: "OpenCode Task Complete"
+  - alias: "OpenCode Permission Alert"
     trigger:
-      - platform: state
-        entity_id: sensor.opencode_myproject_state
-        from: "working"
-        to: "idle"
+      - platform: event
+        event_type: opencode_permission_request
     action:
       - service: notify.mobile_app
         data:
-          title: "OpenCode"
-          message: "Task completed!"
-```
-
-### Auto-approve safe permissions
-
-```yaml
-automation:
-  - alias: "Auto-approve OpenCode read permissions"
-    trigger:
-      - platform: state
-        entity_id: binary_sensor.opencode_myproject_permission_pending
-        to: "on"
-    condition:
-      - condition: template
-        value_template: "{{ 'read' in state_attr('sensor.opencode_myproject_state', 'permission_type') }}"
-    action:
-      - service: opencode.respond_permission
-        data:
-          session_id: "{{ state_attr('sensor.opencode_myproject_state', 'session_id') }}"
-          permission_id: "{{ state_attr('sensor.opencode_myproject_state', 'permission_id') }}"
-          response: once
+          title: "{{ trigger.event.data.title }}"
+          message: >
+            Type: {{ trigger.event.data.type }}
+            Pattern: {{ trigger.event.data.pattern }}
 ```
 
 ## States
@@ -218,6 +273,12 @@ automation:
 1. Verify the resource is loaded (Developer Tools > Network)
 2. Check browser console for JavaScript errors
 3. Clear browser cache and reload
+
+### Notifications not working
+
+1. Ensure both blueprints are installed
+2. Check that the notification service is correct
+3. Verify mobile app is connected to HA
 
 ## Building from Source
 
