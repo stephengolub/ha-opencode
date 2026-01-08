@@ -222,6 +222,8 @@ class OpenCodeCard extends HTMLElement {
   private _stateChangeUnsubscribe: (() => void) | null = null;
   private _historyResponseUnsubscribe: (() => void) | null = null;
   private _agentsResponseUnsubscribe: (() => void) | null = null;
+  // TTS state
+  private _speakingMessageId: string | null = null;
 
   set hass(hass: HomeAssistant) {
     this._hass = hass;
@@ -399,6 +401,8 @@ class OpenCodeCard extends HTMLElement {
       clearInterval(this._autoRefreshInterval);
       this._autoRefreshInterval = null;
     }
+    // Stop any ongoing speech synthesis
+    this._stopSpeaking();
   }
 
   private async _fetchRegistries() {
@@ -1020,6 +1024,31 @@ class OpenCodeCard extends HTMLElement {
         }
       });
     });
+    
+    // TTS speak buttons
+    this.querySelectorAll(".speak-btn").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const messageId = (btn as HTMLElement).dataset.messageId;
+        if (!messageId) return;
+        
+        // If this message is currently speaking, stop it
+        if (this._speakingMessageId === messageId) {
+          this._stopSpeaking();
+          this._render();
+          return;
+        }
+        
+        // Find the message and extract text
+        const msg = this._historyData?.messages.find(m => m.id === messageId);
+        if (msg) {
+          const text = this._extractTextFromMessage(msg);
+          if (text) {
+            this._speakMessage(messageId, text);
+          }
+        }
+      });
+    });
   }
   
   private async _respondToInlinePermission(response: "once" | "always" | "reject") {
@@ -1043,6 +1072,52 @@ class OpenCodeCard extends HTMLElement {
     } catch (err) {
       console.error("[opencode-card] Failed to respond to permission:", err);
     }
+  }
+
+  private _speakMessage(messageId: string, text: string) {
+    // Stop any currently speaking message
+    if (this._speakingMessageId) {
+      this._stopSpeaking();
+    }
+
+    // Check if speech synthesis is available
+    if (!("speechSynthesis" in window)) {
+      console.warn("[opencode-card] Speech synthesis not supported in this browser");
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    
+    utterance.onstart = () => {
+      this._speakingMessageId = messageId;
+      this._render();
+    };
+    
+    utterance.onend = () => {
+      this._speakingMessageId = null;
+      this._render();
+    };
+    
+    utterance.onerror = () => {
+      this._speakingMessageId = null;
+      this._render();
+    };
+
+    window.speechSynthesis.speak(utterance);
+  }
+
+  private _stopSpeaking() {
+    if ("speechSynthesis" in window) {
+      window.speechSynthesis.cancel();
+    }
+    this._speakingMessageId = null;
+  }
+
+  private _extractTextFromMessage(msg: HistoryMessage): string {
+    return msg.parts
+      .filter(part => part.type === "text" && part.content)
+      .map(part => part.content)
+      .join("\n");
   }
 
   private _loadMoreHistory() {
@@ -1369,12 +1444,22 @@ class OpenCodeCard extends HTMLElement {
       metaHtml = `<div class="message-meta">${metaParts.join(" · ")}</div>`;
     }
 
+    // Add speak button for assistant messages that have text content
+    const hasTextContent = msg.parts.some(part => part.type === "text" && part.content);
+    const isSpeaking = this._speakingMessageId === msg.id;
+    const speakButtonHtml = !isUser && hasTextContent ? `
+      <button class="speak-btn ${isSpeaking ? "speaking" : ""}" data-message-id="${msg.id}" title="${isSpeaking ? "Stop speaking" : "Read aloud"}">
+        <ha-icon icon="${isSpeaking ? "mdi:stop" : "mdi:volume-high"}"></ha-icon>
+      </button>
+    ` : "";
+
     return `
       <div class="history-message ${isUser ? "user" : "assistant"}">
         <div class="message-header">
           <ha-icon icon="${isUser ? "mdi:account" : "mdi:robot"}"></ha-icon>
           <span class="message-role">${isUser ? "You" : "Assistant"}</span>
           <span class="message-time" title="${timeInfo.tooltip}">${timeInfo.display}</span>
+          ${speakButtonHtml}
         </div>
         <div class="message-content">
           ${partsHtml}
@@ -2378,6 +2463,29 @@ class OpenCodeCard extends HTMLElement {
       .message-time {
         color: var(--secondary-text-color);
         margin-left: auto;
+      }
+      .speak-btn {
+        background: none;
+        border: none;
+        padding: 4px;
+        cursor: pointer;
+        border-radius: 50%;
+        color: var(--secondary-text-color);
+        transition: background 0.2s, color 0.2s;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .speak-btn:hover {
+        background: var(--divider-color);
+        color: var(--primary-text-color);
+      }
+      .speak-btn.speaking {
+        color: var(--primary-color);
+        animation: pulse 1s ease-in-out infinite;
+      }
+      .speak-btn ha-icon {
+        --mdc-icon-size: 18px;
       }
       .message-content {
         line-height: 1.5;
