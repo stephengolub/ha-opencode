@@ -79,6 +79,7 @@ jobs:
   validate-hacs:
     name: HACS Validation
     runs-on: ubuntu-latest
+    continue-on-error: true  # Non-blocking until brands repo PR is merged
     steps:
       - uses: actions/checkout@v4
       
@@ -89,7 +90,7 @@ jobs:
 
   release:
     name: Release
-    needs: [validate-python, validate-frontend, build-frontend, validate-hacs]
+    needs: [validate-python, validate-frontend, build-frontend]  # HACS validation is non-blocking
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
