@@ -1,9 +1,29 @@
 # OpenCode Home Assistant Integration
 
-[![Documentation](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://stephengolub.github.io/ha-opencode)
-[![GitHub Release](https://img.shields.io/github/v/release/stephengolub/ha-opencode)](https://github.com/stephengolub/ha-opencode/releases)
-[![HACS](https://img.shields.io/badge/HACS-Custom-orange.svg)](https://github.com/hacs/integration)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/opencode-wordmark-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/brand/opencode-wordmark-light.png">
+    <img alt="OpenCode" src="docs/assets/brand/opencode-wordmark-light.png" width="300">
+  </picture>
+</p>
+
+<p align="center">
+  <strong>Unofficial Home Assistant Integration for OpenCode</strong>
+</p>
+
+<p align="center">
+  <a href="https://stephengolub.github.io/ha-opencode"><img src="https://img.shields.io/badge/docs-GitHub%20Pages-blue" alt="Documentation"></a>
+  <a href="https://github.com/stephengolub/ha-opencode/releases"><img src="https://img.shields.io/github/v/release/stephengolub/ha-opencode" alt="GitHub Release"></a>
+  <a href="https://github.com/hacs/integration"><img src="https://img.shields.io/badge/HACS-Custom-orange.svg" alt="HACS"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
+</p>
+
+---
+
+> **Note:** This is an **unofficial** community project and is not affiliated with, endorsed by, or supported by OpenCode or Anomaly. OpenCode branding is used in accordance with their [brand guidelines](https://opencode.ai/brand).
+
+---
 
 A native Home Assistant integration for [OpenCode](https://opencode.ai), the AI coding assistant. Monitor and control your OpenCode sessions directly from Home Assistant.
 
