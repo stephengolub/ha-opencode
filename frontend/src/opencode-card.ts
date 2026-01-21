@@ -259,6 +259,14 @@ class OpenCodeCard extends HTMLElement {
   private _otherInputs: string[] = []; // Custom "Other" text per question
   // Track pending questions per device
   private _pendingQuestions: Map<string, QuestionInfo> = new Map();
+  // Preserve input state across renders
+  private _chatInputValue: string = "";
+  private _savedScrollTop: number | null = null;
+  private _chatInputHadFocus: boolean = false;
+  private _chatInputSelectionStart: number | null = null;
+  private _chatInputSelectionEnd: number | null = null;
+  // Scroll handling
+  private _scrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
   set hass(hass: HomeAssistant) {
     this._hass = hass;
@@ -1110,12 +1118,11 @@ class OpenCodeCard extends HTMLElement {
 
     // Auto-scroll conditions:
     // 1. Initial load - always scroll to bottom
-    // 2. New messages AND (user is at bottom OR auto-refresh is enabled with working session)
+    // 2. New messages AND user is at bottom (respecting user's scroll position)
     // 3. Don't auto-scroll when loading more (user is scrolling up)
-    const device = this._historyDeviceId ? this._devices.get(this._historyDeviceId) : null;
-    const isWorking = device?.entities.get("state")?.state === "working";
+    // 4. Don't force scroll if user has manually scrolled away
     const shouldAutoScroll = (isInitialLoad && !isLoadMore) || 
-      (hadNewMessages && (this._isAtBottom || (this._autoRefreshEnabled && isWorking)));
+      (hadNewMessages && this._isAtBottom && !isLoadMore);
     
     if (shouldAutoScroll) {
       setTimeout(() => this._scrollToBottom(), 0);
@@ -1153,6 +1160,27 @@ class OpenCodeCard extends HTMLElement {
   }
 
   private _render() {
+    // Save input value, focus state, and scroll position before re-render
+    const chatInput = this.querySelector(".chat-input") as HTMLTextAreaElement;
+    if (chatInput) {
+      this._chatInputValue = chatInput.value;
+      this._chatInputHadFocus = document.activeElement === chatInput;
+      if (this._chatInputHadFocus) {
+        this._chatInputSelectionStart = chatInput.selectionStart;
+        this._chatInputSelectionEnd = chatInput.selectionEnd;
+      }
+    }
+    const historyBody = this.querySelector(".history-body");
+    if (historyBody && this._showHistoryView) {
+      // Only save if not at bottom (to preserve user's scroll position)
+      const isAtBottom = historyBody.scrollHeight - historyBody.scrollTop - historyBody.clientHeight < 50;
+      if (!isAtBottom) {
+        this._savedScrollTop = historyBody.scrollTop;
+      } else {
+        this._savedScrollTop = null; // Will scroll to bottom
+      }
+    }
+    
     const title = this._config?.title ?? "OpenCode Sessions";
     const pinnedDevice = this._getPinnedDevice();
     const selectedDevice = this._selectedDeviceId ? this._devices.get(this._selectedDeviceId) : null;
@@ -1222,6 +1250,30 @@ class OpenCodeCard extends HTMLElement {
     `;
 
     this._attachEventListeners();
+    
+    // Restore input value, focus, and cursor position after re-render
+    const newChatInput = this.querySelector(".chat-input") as HTMLTextAreaElement;
+    if (newChatInput) {
+      if (this._chatInputValue) {
+        newChatInput.value = this._chatInputValue;
+      }
+      // Restore focus and cursor position
+      if (this._chatInputHadFocus) {
+        newChatInput.focus();
+        if (this._chatInputSelectionStart !== null && this._chatInputSelectionEnd !== null) {
+          newChatInput.setSelectionRange(this._chatInputSelectionStart, this._chatInputSelectionEnd);
+        }
+      }
+    }
+    
+    // Restore scroll position after re-render
+    const newHistoryBody = this.querySelector(".history-body");
+    if (newHistoryBody && this._showHistoryView) {
+      if (this._savedScrollTop !== null) {
+        newHistoryBody.scrollTop = this._savedScrollTop;
+      }
+      // Don't reset _savedScrollTop here - let scroll handler manage it
+    }
   }
 
   private _attachEventListeners() {
@@ -1424,23 +1476,30 @@ class OpenCodeCard extends HTMLElement {
     const historyBody = this.querySelector(".history-body");
     if (historyBody) {
       historyBody.addEventListener("scroll", () => {
-        if (historyBody.scrollTop < 50 && !this._historyLoadingMore) {
-          const totalMessages = this._historyData?.messages.length || 0;
-          const startIndex = Math.max(0, totalMessages - this._historyVisibleCount);
-          if (startIndex > 0) {
-            this._loadMoreHistory();
-          }
+        // Debounce scroll handling to prevent stuttering
+        if (this._scrollDebounceTimer) {
+          clearTimeout(this._scrollDebounceTimer);
         }
         
-        const isAtBottom = historyBody.scrollHeight - historyBody.scrollTop - historyBody.clientHeight < 50;
-        if (isAtBottom !== this._isAtBottom) {
+        this._scrollDebounceTimer = setTimeout(() => {
+          // Check for load more (scrolled near top)
+          if (historyBody.scrollTop < 50 && !this._historyLoadingMore) {
+            const totalMessages = this._historyData?.messages.length || 0;
+            const startIndex = Math.max(0, totalMessages - this._historyVisibleCount);
+            if (startIndex > 0) {
+              this._loadMoreHistory();
+            }
+          }
+          
+          // Update isAtBottom state and toggle button visibility directly (no re-render)
+          const isAtBottom = historyBody.scrollHeight - historyBody.scrollTop - historyBody.clientHeight < 50;
           this._isAtBottom = isAtBottom;
           const scrollBtn = this.querySelector(".scroll-to-bottom-btn");
           if (scrollBtn) {
             scrollBtn.classList.toggle("hidden", isAtBottom);
           }
-        }
-      });
+        }, 100); // 100ms debounce
+      }, { passive: true }); // Use passive listener for better scroll performance
     }
 
     this.querySelector(".scroll-to-bottom-btn")?.addEventListener("click", () => {
@@ -1452,6 +1511,7 @@ class OpenCodeCard extends HTMLElement {
       if (textarea?.value.trim()) {
         this._sendChatMessage(textarea.value.trim());
         textarea.value = "";
+        this._chatInputValue = ""; // Clear preserved value too
       }
     });
 
@@ -1463,6 +1523,7 @@ class OpenCodeCard extends HTMLElement {
         if (textarea?.value.trim()) {
           this._sendChatMessage(textarea.value.trim());
           textarea.value = "";
+          this._chatInputValue = ""; // Clear preserved value too
         }
       }
     });

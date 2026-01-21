@@ -11,6 +11,11 @@ blueprint:
     Works with both iOS and Android via the Home Assistant Companion app.
     
     Requires the OpenCode integration to be installed and configured.
+    
+    Message templates support these variables:
+    - %%FQDN%% - Full hostname (e.g., laptop.example.io)
+    - %%host%% - Short hostname (e.g., laptop)
+    - %%message%% - The notification message content
   domain: automation
   author: ha-opencode
   source_url: https://github.com/stephengolub/ha-opencode/blob/main/blueprints/automation/opencode_state_notifications.yaml
@@ -68,6 +73,17 @@ blueprint:
       default: "/lovelace/opencode"
       selector:
         text:
+    
+    message_template:
+      name: Message Template
+      description: >
+        Template for notification messages. Available variables:
+        %%FQDN%% - Full hostname (e.g., laptop.example.io)
+        %%host%% - Short hostname (e.g., laptop)  
+        %%message%% - The notification message content
+      default: "%%host%%: %%message%%"
+      selector:
+        text:
 
 mode: parallel
 max_exceeded: silent
@@ -92,8 +108,12 @@ variables:
   previous_state: "{{ trigger.event.data.previous_state | default('unknown') }}"
   session_id: "{{ trigger.event.data.session_id }}"
   session_title: "{{ trigger.event.data.session_title | default('Task finished') }}"
-  hostname: "{{ trigger.event.data.hostname | default('OpenCode') }}"
+  fqdn: "{{ trigger.event.data.hostname | default('OpenCode') }}"
+  host: "{{ (trigger.event.data.hostname | default('OpenCode')).split('.')[0] }}"
   instance_id: "{{ trigger.event.data.instance_id | default('') }}"
+  
+  # Message template from input
+  msg_template: !input message_template
   
   # For permission_request events (more detailed)
   permission_id: "{{ trigger.event.data.permission_id | default('') }}"
@@ -111,9 +131,9 @@ variables:
   # Determine if this is a transition we care about
   was_working: "{{ previous_state == 'working' }}"
   
-  # Build detailed permission message
-  permission_message: >
-    {% set msg = hostname ~ ": " ~ permission_title %}
+  # Build detailed permission message content (without hostname prefix)
+  permission_content: >
+    {% set msg = permission_title %}
     {% if permission_type and permission_type != 'unknown' %}
       {% set msg = msg ~ "\nType: " ~ permission_type %}
     {% endif %}
@@ -122,9 +142,9 @@ variables:
     {% endif %}
     {{ msg }}
   
-  # Build question message
-  question_message: >
-    {% set msg = hostname ~ ": " ~ question_header %}
+  # Build question message content (without hostname prefix)
+  question_content: >
+    {% set msg = question_header %}
     {% if question_text %}
       {% set msg = msg ~ "\n" ~ question_text %}
     {% endif %}
@@ -139,7 +159,7 @@ action:
     data:
       message: >
         OpenCode event: trigger={{ trigger_id }}, new_state={{ new_state }}, previous_state={{ previous_state }}, 
-        session_id={{ session_id }}, hostname={{ hostname }}, permission_id={{ permission_id }},
+        session_id={{ session_id }}, fqdn={{ fqdn }}, host={{ host }}, permission_id={{ permission_id }},
         permission_type={{ permission_type }}, permission_title={{ permission_title }}
       level: info
       logger: ha-opencode.blueprint
@@ -155,7 +175,7 @@ action:
           - service: !input notify_service
             data:
               title: "OpenCode: Permission Required"
-              message: "{{ permission_message }}"
+              message: "{{ msg_template | replace('%%FQDN%%', fqdn) | replace('%%host%%', host) | replace('%%message%%', permission_content) }}"
               data:
                 tag: "opencode-permission-{{ session_id }}"
                 channel: !input notification_channel
@@ -185,7 +205,7 @@ action:
           - service: !input notify_service
             data:
               title: "OpenCode: Permission Required"
-              message: "{{ hostname }}: Permission needed for {{ session_title }}"
+              message: "{{ msg_template | replace('%%FQDN%%', fqdn) | replace('%%host%%', host) | replace('%%message%%', 'Permission needed for ' ~ session_title) }}"
               data:
                 tag: "opencode-permission-{{ session_id }}"
                 channel: !input notification_channel
@@ -214,7 +234,7 @@ action:
           - service: !input notify_service
             data:
               title: "OpenCode: Error"
-              message: "{{ hostname }}: An error occurred in {{ session_title }}"
+              message: "{{ msg_template | replace('%%FQDN%%', fqdn) | replace('%%host%%', host) | replace('%%message%%', 'An error occurred in ' ~ session_title) }}"
               data:
                 tag: "opencode-error-{{ session_id }}"
                 channel: !input notification_channel
@@ -234,7 +254,7 @@ action:
           - service: !input notify_service
             data:
               title: "OpenCode: Task Complete"
-              message: "{{ hostname }}: {{ session_title }}"
+              message: "{{ msg_template | replace('%%FQDN%%', fqdn) | replace('%%host%%', host) | replace('%%message%%', session_title) }}"
               data:
                 tag: "opencode-complete-{{ session_id }}"
                 channel: !input notification_channel
@@ -251,7 +271,7 @@ action:
           - service: !input notify_service
             data:
               title: "OpenCode: Input Required"
-              message: "{{ question_message }}"
+              message: "{{ msg_template | replace('%%FQDN%%', fqdn) | replace('%%host%%', host) | replace('%%message%%', question_content) }}"
               data:
                 tag: "opencode-question-{{ session_id }}"
                 channel: !input notification_channel
@@ -275,7 +295,7 @@ action:
           - service: !input notify_service
             data:
               title: "OpenCode: Input Required"
-              message: "{{ hostname }}: A question needs your answer"
+              message: "{{ msg_template | replace('%%FQDN%%', fqdn) | replace('%%host%%', host) | replace('%%message%%', 'A question needs your answer') }}"
               data:
                 tag: "opencode-question-{{ session_id }}"
                 channel: !input notification_channel
