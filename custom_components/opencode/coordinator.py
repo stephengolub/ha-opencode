@@ -16,9 +16,11 @@ from homeassistant.helpers import device_registry as dr
 from .const import (
     DOMAIN,
     EVENT_PERMISSION_REQUEST,
+    EVENT_QUESTION_REQUEST,
     EVENT_STATE_CHANGE,
     PAIRING_CODE_EXPIRY_SECONDS,
     PAIRING_CODE_LENGTH,
+    STATE_WAITING_INPUT,
     STATE_WAITING_PERMISSION,
     DEFAULT_STALE_SESSION_DAYS,
 )
@@ -60,6 +62,8 @@ class SessionData:
     hostname: str | None = None
     error_message: str | None = None
     permission: PermissionData | None = None
+    parent_session_id: str | None = None
+    question: dict | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], instance_id: str) -> SessionData:
@@ -95,6 +99,8 @@ class SessionData:
             hostname=data.get("hostname"),
             error_message=data.get("error_message"),
             permission=permission,
+            parent_session_id=data.get("parent_session_id"),
+            question=data.get("question"),
         )
 
 
@@ -264,6 +270,14 @@ class OpenCodeCoordinator:
         # Create/update session
         session = SessionData.from_dict(session_data, instance_id)
         
+        _LOGGER.debug(
+            "Session update: id=%s, state=%s, permission=%s, question=%s",
+            session_id,
+            session.state,
+            session.permission.permission_id if session.permission else None,
+            bool(session.question),
+        )
+        
         # Preserve previous_state from the transition
         if old_state and old_state != session.state:
             session.previous_state = old_state
@@ -289,6 +303,12 @@ class OpenCodeCoordinator:
 
         # Fire permission event if waiting for permission
         if session.state == STATE_WAITING_PERMISSION and session.permission:
+            _LOGGER.info(
+                "Firing permission request event: session=%s, permission_id=%s, title=%s",
+                session_id,
+                session.permission.permission_id,
+                session.permission.title,
+            )
             self.hass.bus.async_fire(
                 EVENT_PERMISSION_REQUEST,
                 {
@@ -298,6 +318,26 @@ class OpenCodeCoordinator:
                     "title": session.permission.title,
                     "pattern": session.permission.pattern,
                     "instance_id": instance_id,
+                },
+            )
+
+        # Fire question event if waiting for input
+        if session.state == STATE_WAITING_INPUT and session.question:
+            questions = session.question.get("questions", [])
+            first_question = questions[0] if questions else {}
+            request_id = session.question.get("request_id", "")
+            self.hass.bus.async_fire(
+                EVENT_QUESTION_REQUEST,
+                {
+                    "session_id": session_id,
+                    "request_id": request_id,
+                    "header": first_question.get("header", "Question"),
+                    "question": first_question.get("question", ""),
+                    "options": first_question.get("options", []),
+                    "multiple": first_question.get("multiple", False),
+                    "question_count": len(questions),
+                    "instance_id": instance_id,
+                    "hostname": session.hostname,
                 },
             )
 

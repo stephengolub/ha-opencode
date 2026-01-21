@@ -1,0 +1,121 @@
+blueprint:
+  name: OpenCode Question Response Handler
+  description: >
+    Handles question response actions from OpenCode notifications.
+    
+    Note: Due to the complexity of question responses (multiple questions, 
+    multiple options per question, custom "Other" text), this blueprint 
+    primarily handles simple single-option responses from mobile notifications.
+    
+    For full question answering functionality, use the OpenCode Lovelace card
+    which provides a complete UI for multi-question, multi-select scenarios.
+    
+    This blueprint listens for notification actions and can send simple
+    responses via the OpenCode integration service.
+    
+    Works with both iOS and Android via the Home Assistant Companion app.
+    
+    Use this together with the OpenCode State Notifications blueprint.
+  domain: automation
+  author: ha-opencode
+  source_url: https://github.com/stephengolub/ha-opencode/blob/main/blueprints/automation/opencode_question_response.yaml
+  input: {}
+
+mode: parallel
+max_exceeded: silent
+
+trigger:
+  - platform: event
+    event_type: mobile_app_notification_action
+
+variables:
+  # Get the action string
+  action: "{{ trigger.event.data.action | default('') }}"
+  
+  # Check if this is an OpenCode question action
+  is_question_action: >
+    {{ action.startswith('OPENCODE_ANSWER_') or action.startswith('OPENCODE_CANCEL_QUESTION_') }}
+  
+  is_cancel: "{{ action.startswith('OPENCODE_CANCEL_QUESTION_') }}"
+  
+  # Extract session_id from action name (after the prefix)
+  session_id_from_action: >
+    {% if action.startswith('OPENCODE_ANSWER_') %}
+      {{ action[16:].split('_')[0] }}
+    {% elif action.startswith('OPENCODE_CANCEL_QUESTION_') %}
+      {{ action[25:] }}
+    {% else %}
+      
+    {% endif %}
+  
+  # Extract answer index if present (format: OPENCODE_ANSWER_sessionid_index)
+  answer_index: >
+    {% if action.startswith('OPENCODE_ANSWER_') %}
+      {% set parts = action[16:].split('_') %}
+      {% if parts | length > 1 %}
+        {{ parts[1] | int }}
+      {% else %}
+        0
+      {% endif %}
+    {% else %}
+      -1
+    {% endif %}
+  
+  # Get data passed from the notification
+  action_data: >
+    {% if trigger.event.data.action_data is defined %}
+      {{ trigger.event.data.action_data }}
+    {% elif trigger.event.data.data is defined %}
+      {{ trigger.event.data.data }}
+    {% else %}
+      {}
+    {% endif %}
+  
+  session_id: "{{ action_data.session_id | default(session_id_from_action) | trim }}"
+  
+  # Get the answer label from action_data if available
+  answer_label: "{{ action_data.answer_label | default('') | trim }}"
+  
+  # Build the answers array - for simple responses, just one question with one answer
+  answers: >
+    {% if is_cancel %}
+      []
+    {% elif answer_label %}
+      [[{{ answer_label | tojson }}]]
+    {% else %}
+      []
+    {% endif %}
+
+condition:
+  - condition: template
+    value_template: "{{ is_question_action }}"
+
+action:
+  # Log for debugging
+  - service: system_log.write
+    data:
+      message: >
+        OpenCode question response: action={{ action }}, is_cancel={{ is_cancel }}, 
+        session_id={{ session_id }}, answer_index={{ answer_index }},
+        answer_label={{ answer_label }}, answers={{ answers }}
+      level: info
+      logger: ha-opencode.question
+
+  # Check we have required data before calling service
+  - condition: template
+    value_template: "{{ session_id != '' }}"
+
+  # Send the question response
+  - service: opencode.respond_question
+    data:
+      session_id: "{{ session_id }}"
+      answers: "{{ answers }}"
+
+  # Log success
+  - service: system_log.write
+    data:
+      message: >
+        OpenCode question response sent for session {{ session_id }}: 
+        {{ 'cancelled' if is_cancel else answers }}
+      level: info
+      logger: ha-opencode.question

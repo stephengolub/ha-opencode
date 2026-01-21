@@ -5,6 +5,7 @@ blueprint:
     Notifies when:
     - A task completes (idle after working)
     - Permission is required (with approve/reject buttons and full details)
+    - Question/input is required (with answer options)
     - An error occurs
     
     Works with both iOS and Android via the Home Assistant Companion app.
@@ -32,6 +33,13 @@ blueprint:
     notify_on_permission:
       name: Notify on Permission Required
       description: Send a notification with approve/reject buttons when permission is needed.
+      default: true
+      selector:
+        boolean:
+    
+    notify_on_question:
+      name: Notify on Question/Input Required
+      description: Send a notification when OpenCode asks a question requiring user input.
       default: true
       selector:
         boolean:
@@ -71,6 +79,9 @@ trigger:
   - platform: event
     event_type: opencode_permission_request
     id: permission_request
+  - platform: event
+    event_type: opencode_question_request
+    id: question_request
 
 variables:
   # Determine which trigger fired
@@ -90,6 +101,13 @@ variables:
   permission_title: "{{ trigger.event.data.title | default('Permission Required') }}"
   permission_pattern: "{{ trigger.event.data.pattern | default('') }}"
   
+  # For question_request events
+  question_header: "{{ trigger.event.data.header | default('Question') }}"
+  question_text: "{{ trigger.event.data.question | default('') }}"
+  question_options: "{{ trigger.event.data.options | default([]) }}"
+  question_multiple: "{{ trigger.event.data.multiple | default(false) }}"
+  question_count: "{{ trigger.event.data.question_count | default(1) }}"
+  
   # Determine if this is a transition we care about
   was_working: "{{ previous_state == 'working' }}"
   
@@ -101,6 +119,17 @@ variables:
     {% endif %}
     {% if permission_pattern %}
       {% set msg = msg ~ "\nPattern: " ~ permission_pattern %}
+    {% endif %}
+    {{ msg }}
+  
+  # Build question message
+  question_message: >
+    {% set msg = hostname ~ ": " ~ question_header %}
+    {% if question_text %}
+      {% set msg = msg ~ "\n" ~ question_text %}
+    {% endif %}
+    {% if question_count > 1 %}
+      {% set msg = msg ~ "\n(" ~ question_count ~ " questions)" %}
     {% endif %}
     {{ msg }}
 
@@ -211,3 +240,50 @@ action:
                 channel: !input notification_channel
                 clickAction: !input dashboard_path
                 url: !input dashboard_path
+
+      # Question Request Event (dedicated event with full details)
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger_id == 'question_request' }}"
+          - condition: template
+            value_template: !input notify_on_question
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "OpenCode: Input Required"
+              message: "{{ question_message }}"
+              data:
+                tag: "opencode-question-{{ session_id }}"
+                channel: !input notification_channel
+                importance: high
+                priority: high
+                ttl: 0
+                clickAction: !input dashboard_path
+                url: !input dashboard_path
+                # Pass data needed for question response
+                action_data:
+                  session_id: "{{ session_id }}"
+                  instance_id: "{{ instance_id }}"
+
+      # Question Required (state change - fallback if question event doesn't fire)
+      - conditions:
+          - condition: template
+            value_template: "{{ trigger_id == 'state_change' and new_state == 'waiting_input' }}"
+          - condition: template
+            value_template: !input notify_on_question
+        sequence:
+          - service: !input notify_service
+            data:
+              title: "OpenCode: Input Required"
+              message: "{{ hostname }}: A question needs your answer"
+              data:
+                tag: "opencode-question-{{ session_id }}"
+                channel: !input notification_channel
+                importance: high
+                priority: high
+                ttl: 0
+                clickAction: !input dashboard_path
+                url: !input dashboard_path
+                action_data:
+                  session_id: "{{ session_id }}"
+                  instance_id: "{{ instance_id }}"

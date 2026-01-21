@@ -20,11 +20,13 @@ PAIRING_CODE_EXPIRY_SECONDS: Final = 300  # 5 minutes
 STATE_IDLE: Final = "idle"
 STATE_WORKING: Final = "working"
 STATE_WAITING_PERMISSION: Final = "waiting_permission"
+STATE_WAITING_INPUT: Final = "waiting_input"
 STATE_ERROR: Final = "error"
 
 # Events
 EVENT_STATE_CHANGE: Final = "opencode_state_change"
 EVENT_PERMISSION_REQUEST: Final = "opencode_permission_request"
+EVENT_QUESTION_REQUEST: Final = "opencode_question_request"
 EVENT_HISTORY_RESPONSE: Final = "opencode_history_response"
 EVENT_AGENTS_RESPONSE: Final = "opencode_agents_response"
 
@@ -44,6 +46,7 @@ WS_TYPE_AGENTS_RESPONSE: Final = "opencode/agents_response"
 # Command types (HA -> Plugin)
 CMD_SEND_PROMPT: Final = "send_prompt"
 CMD_RESPOND_PERMISSION: Final = "respond_permission"
+CMD_RESPOND_QUESTION: Final = "respond_question"
 CMD_ABORT_SESSION: Final = "abort_session"
 CMD_GET_HISTORY: Final = "get_history"
 CMD_GET_AGENTS: Final = "get_agents"
@@ -64,3 +67,5 @@ ATTR_PERMISSION_PATTERN: Final = "pattern"
 ATTR_PERMISSION_METADATA: Final = "metadata"
 ATTR_SESSION_ID: Final = "session_id"
 ATTR_INSTANCE_ID: Final = "instance_id"
+ATTR_PARENT_SESSION_ID: Final = "parent_session_id"
+ATTR_QUESTION: Final = "question"

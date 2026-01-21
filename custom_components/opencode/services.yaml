@@ -88,6 +88,16 @@ get_history:
       example: "2025-01-07T12:00:00Z"
       selector:
         text:
+    limit:
+      name: Limit
+      description: Maximum number of messages to return (most recent messages first)
+      required: false
+      example: 10
+      selector:
+        number:
+          min: 1
+          max: 1000
+          mode: box
     request_id:
       name: Request ID
       description: Optional request ID for correlating the response event
@@ -114,3 +124,22 @@ get_agents:
       example: "req_123"
       selector:
         text:
+
+respond_question:
+  name: Respond to Question
+  description: Respond to a pending question prompt in an OpenCode session
+  fields:
+    session_id:
+      name: Session ID
+      description: The session ID with the pending question
+      required: true
+      example: "ses_abc123def456"
+      selector:
+        text:
+    answers:
+      name: Answers
+      description: Array of answers, each containing selected option labels. For multi-select questions, include multiple labels per answer.
+      required: true
+      example: '[["Option A"], ["Option B", "Option C"]]'
+      selector:
+        object:

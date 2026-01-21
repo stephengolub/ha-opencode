@@ -43,6 +43,7 @@ interface OpenCodeDevice {
   deviceName: string;
   sessionId: string;
   entities: Map<string, HassEntity>;
+  parentSessionId: string | null;
 }
 
 interface CardConfig {
@@ -50,6 +51,8 @@ interface CardConfig {
   title?: string;
   device?: string; // Device ID to pin to
   working_refresh_interval?: number; // Auto-refresh interval in seconds when working (default: 10)
+  hide_unknown?: boolean; // Hide sessions with unknown state (default: false)
+  sort_by?: "activity" | "name"; // Sort mode (default: "activity")
 }
 
 // Agent types
@@ -99,6 +102,7 @@ interface HistoryResponse {
   messages: HistoryMessage[];
   fetched_at: string;
   since?: string;
+  total_count?: number;
 }
 
 interface CachedHistory {
@@ -112,6 +116,25 @@ interface StateChangeEvent {
   new_state: string;
   hostname: string;
   session_title: string;
+}
+
+// Question tool types
+interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+interface QuestionItem {
+  question: string;
+  header: string;
+  multiple: boolean;
+  options: QuestionOption[];
+}
+
+interface QuestionInfo {
+  session_id: string;
+  request_id?: string;
+  questions: QuestionItem[];
 }
 
 interface HistoryResponseEvent {
@@ -180,6 +203,7 @@ const STATE_CONFIG: Record<string, { icon: string; color: string; label: string 
   idle: { icon: "mdi:sleep", color: "#4caf50", label: "Idle" },
   working: { icon: "mdi:cog", color: "#2196f3", label: "Working" },
   waiting_permission: { icon: "mdi:shield-alert", color: "#ff9800", label: "Needs Permission" },
+  waiting_input: { icon: "mdi:comment-question", color: "#9c27b0", label: "Awaiting Input" },
   error: { icon: "mdi:alert-circle", color: "#f44336", label: "Error" },
   unknown: { icon: "mdi:help-circle", color: "#9e9e9e", label: "Unknown" },
 };
@@ -219,12 +243,22 @@ class OpenCodeCard extends HTMLElement {
   private _lastDeviceState: string | null = null;
   // Sorting
   private _sortMode: "activity" | "name" = "activity";
+  // Hide unknown sessions toggle
+  private _hideUnknown = false;
   // Event subscriptions
   private _stateChangeUnsubscribe: (() => void) | null = null;
   private _historyResponseUnsubscribe: (() => void) | null = null;
   private _agentsResponseUnsubscribe: (() => void) | null = null;
   // TTS state
   private _speakingMessageId: string | null = null;
+  // Question modal state
+  private _showQuestionModal = false;
+  private _activeQuestion: QuestionInfo | null = null;
+  private _questionAnswers: string[][] = []; // Answers per question (array of selected labels)
+  private _currentQuestionIndex = 0;
+  private _otherInputs: string[] = []; // Custom "Other" text per question
+  // Track pending questions per device
+  private _pendingQuestions: Map<string, QuestionInfo> = new Map();
 
   set hass(hass: HomeAssistant) {
     this._hass = hass;
@@ -347,6 +381,14 @@ class OpenCodeCard extends HTMLElement {
 
   setConfig(config: CardConfig) {
     this._config = config;
+    
+    // Apply config defaults for toggles
+    if (config.hide_unknown !== undefined) {
+      this._hideUnknown = config.hide_unknown;
+    }
+    if (config.sort_by !== undefined) {
+      this._sortMode = config.sort_by;
+    }
   }
 
   private async _initialize() {
@@ -476,6 +518,7 @@ class OpenCodeCard extends HTMLElement {
           deviceName: device.name,
           sessionId: sessionId,
           entities: new Map(),
+          parentSessionId: null,
         };
         this._devices.set(device.id, openCodeDevice);
       }
@@ -501,15 +544,31 @@ class OpenCodeCard extends HTMLElement {
       if (entityKey) {
         openCodeDevice.entities.set(entityKey, state);
       }
+      
+      // Update parent session ID from state entity attributes
+      if (entityKey === "state" && state.attributes?.parent_session_id) {
+        openCodeDevice.parentSessionId = state.attributes.parent_session_id as string;
+      }
     }
 
     this._updatePendingPermissions();
+    this._updatePendingQuestions();
   }
 
   private _updatePendingPermissions() {
     for (const [deviceId, device] of this._devices) {
       const permissionEntity = device.entities.get("permission_pending");
       const stateEntity = device.entities.get("state");
+
+      // Only log when state is waiting_permission
+      if (stateEntity?.state === "waiting_permission") {
+        console.log("[opencode-card] PERMISSION DEBUG:", {
+          deviceId,
+          stateEntityState: stateEntity?.state,
+          permissionEntityState: permissionEntity?.state,
+          permissionEntityAttrs: permissionEntity?.attributes,
+        });
+      }
 
       // Binary sensor: "on" means permission is pending
       if (permissionEntity?.state === "on" && permissionEntity.attributes) {
@@ -523,10 +582,22 @@ class OpenCodeCard extends HTMLElement {
             pattern: attrs.pattern as string | undefined,
             metadata: attrs.metadata as Record<string, unknown> | undefined,
           });
+        } else if (stateEntity?.state === "waiting_permission") {
+          // Has permission entity "on" but missing attrs - use fallback
+          console.log("[opencode-card] Permission entity on but missing attrs, using fallback");
+          this._pendingPermissions.set(deviceId, {
+            permission_id: "",
+            type: "pending",
+            title: "Permission Required",
+            session_id: device.sessionId,
+          });
         }
       } else if (stateEntity?.state !== "waiting_permission" || permissionEntity?.state === "off") {
         this._pendingPermissions.delete(deviceId);
       } else if (stateEntity?.state === "waiting_permission" && !this._pendingPermissions.has(deviceId)) {
+        // State is waiting_permission but no permission entity or it's not "on"
+        // This is a fallback - show generic permission request
+        console.log("[opencode-card] Using fallback permission display for device:", deviceId);
         this._pendingPermissions.set(deviceId, {
           permission_id: "",
           type: "pending",
@@ -537,9 +608,36 @@ class OpenCodeCard extends HTMLElement {
     }
   }
 
+  private _updatePendingQuestions() {
+    for (const [deviceId, device] of this._devices) {
+      const stateEntity = device.entities.get("state");
+      const currentState = stateEntity?.state ?? "unknown";
+
+      // Check if state is waiting_input and question attribute exists
+      if (currentState === "waiting_input") {
+        const questionAttr = stateEntity?.attributes?.question as QuestionInfo | undefined;
+        if (questionAttr && questionAttr.questions && questionAttr.questions.length > 0) {
+          this._pendingQuestions.set(deviceId, questionAttr);
+        } else if (!this._pendingQuestions.has(deviceId)) {
+          // State is waiting_input but no question data yet - use placeholder
+          this._pendingQuestions.set(deviceId, {
+            session_id: device.sessionId,
+            questions: [],
+          });
+        }
+      } else {
+        this._pendingQuestions.delete(deviceId);
+      }
+    }
+  }
+
   private _getPinnedDevice(): OpenCodeDevice | null {
     if (!this._config?.device) return null;
     return this._devices.get(this._config.device) || null;
+  }
+
+  private _getQuestionDetails(device: OpenCodeDevice): QuestionInfo | null {
+    return this._pendingQuestions.get(device.deviceId) || null;
   }
 
   private _getPermissionDetails(device: OpenCodeDevice): PermissionDetails | null {
@@ -580,18 +678,211 @@ class OpenCodeCard extends HTMLElement {
     this._render();
   }
 
+  private _showQuestion(deviceId: string) {
+    const question = this._pendingQuestions.get(deviceId);
+    if (question && question.questions.length > 0) {
+      this._activeQuestion = question;
+      this._showQuestionModal = true;
+      this._currentQuestionIndex = 0;
+      this._questionAnswers = question.questions.map(() => []);
+      this._otherInputs = question.questions.map(() => "");
+      this._render();
+    }
+  }
+
+  private _hideQuestionModal() {
+    this._showQuestionModal = false;
+    this._activeQuestion = null;
+    this._currentQuestionIndex = 0;
+    this._questionAnswers = [];
+    this._otherInputs = [];
+    this._render();
+  }
+
+  private _nextQuestion() {
+    if (this._activeQuestion && this._currentQuestionIndex < this._activeQuestion.questions.length - 1) {
+      this._currentQuestionIndex++;
+      this._render();
+    }
+  }
+
+  private _prevQuestion() {
+    if (this._currentQuestionIndex > 0) {
+      this._currentQuestionIndex--;
+      this._render();
+    }
+  }
+
+  private _updateQuestionAnswer(label: string, checked: boolean) {
+    if (!this._activeQuestion) return;
+    
+    const currentQ = this._activeQuestion.questions[this._currentQuestionIndex];
+    let answers = [...(this._questionAnswers[this._currentQuestionIndex] || [])];
+    
+    if (currentQ.multiple) {
+      // Checkbox behavior
+      if (checked) {
+        if (!answers.includes(label)) {
+          answers.push(label);
+        }
+      } else {
+        answers = answers.filter(a => a !== label);
+      }
+    } else {
+      // Radio behavior
+      answers = checked ? [label] : [];
+    }
+    
+    this._questionAnswers[this._currentQuestionIndex] = answers;
+    this._render();
+  }
+
+  private _updateOtherInput(value: string) {
+    this._otherInputs[this._currentQuestionIndex] = value;
+    // Don't re-render on every keystroke
+  }
+
+  private async _cancelQuestion() {
+    if (!this._hass || !this._activeQuestion) return;
+    
+    try {
+      // Call respond_question with empty answers to cancel/terminate
+      await this._hass.callService("opencode", "respond_question", {
+        session_id: this._activeQuestion.session_id,
+        answers: [], // Empty answers signals cancellation
+      });
+    } catch (err) {
+      console.error("[opencode-card] Failed to cancel question:", err);
+    }
+    
+    this._hideQuestionModal();
+  }
+
+  private async _submitQuestionAnswers() {
+    if (!this._hass || !this._activeQuestion) return;
+    
+    // Build answers array - each question gets an array of selected labels
+    const answers: string[][] = this._activeQuestion.questions.map((q, idx) => {
+      const selected = this._questionAnswers[idx] || [];
+      const otherText = this._otherInputs[idx] || "";
+      
+      // Replace __other__ with actual text if provided
+      return selected.map(s => s === "__other__" && otherText ? otherText : s)
+                     .filter(s => s !== "__other__"); // Remove unfilled "other"
+    });
+    
+    try {
+      await this._hass.callService("opencode", "respond_question", {
+        session_id: this._activeQuestion.session_id,
+        answers: answers,
+      });
+      
+      this._hideQuestionModal();
+      
+      // Refresh history after short delay
+      if (this._showHistoryView) {
+        setTimeout(() => this._refreshHistory(), 500);
+      }
+    } catch (err) {
+      console.error("[opencode-card] Failed to submit question answers:", err);
+    }
+  }
+
+  private async _submitInlineQuestion() {
+    if (!this._hass || !this._historyDeviceId) return;
+    
+    const question = this._pendingQuestions.get(this._historyDeviceId);
+    if (!question || question.questions.length === 0) return;
+    
+    // Collect answers from inline checkboxes/radios
+    const answers: string[][] = [];
+    const firstQ = question.questions[0];
+    const selectedLabels: string[] = [];
+    
+    this.querySelectorAll(".inline-question-input:checked").forEach((input) => {
+      const label = (input as HTMLInputElement).dataset.label;
+      if (label) {
+        selectedLabels.push(label);
+      }
+    });
+    
+    answers.push(selectedLabels);
+    
+    // For multi-question scenarios (shouldn't happen with inline), add empty arrays
+    for (let i = 1; i < question.questions.length; i++) {
+      answers.push([]);
+    }
+    
+    try {
+      await this._hass.callService("opencode", "respond_question", {
+        session_id: question.session_id,
+        answers: answers,
+      });
+      
+      // Refresh history after short delay
+      setTimeout(() => this._refreshHistory(), 500);
+    } catch (err) {
+      console.error("[opencode-card] Failed to submit inline question:", err);
+    }
+  }
+
   private _selectDevice(deviceId: string) {
     this._selectedDeviceId = deviceId;
     this._render();
   }
 
   private _goBack() {
+    // If viewing a sub-agent, navigate back to its parent
+    const currentDevice = this._selectedDeviceId ? this._devices.get(this._selectedDeviceId) : null;
+    if (currentDevice?.parentSessionId) {
+      // Find parent device by session ID
+      const parentDevice = this._findDeviceBySessionId(currentDevice.parentSessionId);
+      if (parentDevice) {
+        this._selectedDeviceId = parentDevice.deviceId;
+        this._render();
+        return;
+      }
+    }
     this._selectedDeviceId = null;
     this._render();
   }
 
   private _isPinned(): boolean {
     return !!this._config?.device;
+  }
+
+  /**
+   * Find a device by its session ID.
+   */
+  private _findDeviceBySessionId(sessionId: string): OpenCodeDevice | undefined {
+    for (const device of this._devices.values()) {
+      if (device.sessionId === sessionId) {
+        return device;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Get all child sessions for a given parent session ID.
+   */
+  private _getChildSessions(parentSessionId: string): OpenCodeDevice[] {
+    const children: OpenCodeDevice[] = [];
+    for (const device of this._devices.values()) {
+      if (device.parentSessionId === parentSessionId) {
+        children.push(device);
+      }
+    }
+    // Sort by last activity (newest first)
+    children.sort((a, b) => {
+      const aActivity = a.entities.get("last_activity")?.state ?? "";
+      const bActivity = b.entities.get("last_activity")?.state ?? "";
+      if (!aActivity && !bActivity) return 0;
+      if (!aActivity) return 1;
+      if (!bActivity) return -1;
+      return new Date(bActivity).getTime() - new Date(aActivity).getTime();
+    });
+    return children;
   }
 
   private async _sendChatMessage(text: string) {
@@ -750,6 +1041,7 @@ class OpenCodeCard extends HTMLElement {
     try {
       await this._hass.callService("opencode", "get_history", {
         session_id: this._historySessionId,
+        limit: OpenCodeCard.HISTORY_PAGE_SIZE,
         request_id: `req_${Date.now()}`,
       });
       // Response comes via event subscription
@@ -779,27 +1071,50 @@ class OpenCodeCard extends HTMLElement {
 
     const hadNewMessages = response.since && response.messages.length > 0;
     const isInitialLoad = !this._historyData;
+    const isLoadMore = this._historyLoadingMore;
 
     if (response.since && this._historyData) {
+      // Incremental update - append new messages
       const existingIds = new Set(this._historyData.messages.map(m => m.id));
       const newMessages = response.messages.filter(m => !existingIds.has(m.id));
       this._historyData.messages.push(...newMessages);
       this._historyData.fetched_at = response.fetched_at;
+      // Update total_count if provided
+      if (response.total_count !== undefined) {
+        this._historyData.total_count = response.total_count;
+      }
+    } else if (isLoadMore && this._historyData) {
+      // Load more - merge older messages at the beginning
+      const existingIds = new Set(this._historyData.messages.map(m => m.id));
+      const olderMessages = response.messages.filter(m => !existingIds.has(m.id));
+      // Prepend older messages
+      this._historyData.messages = [...olderMessages, ...this._historyData.messages];
+      this._historyData.fetched_at = response.fetched_at;
+      // Show all messages now
+      this._historyVisibleCount = this._historyData.messages.length;
+      if (response.total_count !== undefined) {
+        this._historyData.total_count = response.total_count;
+      }
     } else {
+      // Initial load or full replacement
       this._historyData = response;
+      // For initial load with limit, show only what we got
+      this._historyVisibleCount = Math.max(this._historyVisibleCount, response.messages.length);
     }
 
     this._saveHistoryToCache(this._historySessionId, this._historyData);
 
     this._historyLoading = false;
+    this._historyLoadingMore = false;
     this._render();
 
     // Auto-scroll conditions:
     // 1. Initial load - always scroll to bottom
     // 2. New messages AND (user is at bottom OR auto-refresh is enabled with working session)
+    // 3. Don't auto-scroll when loading more (user is scrolling up)
     const device = this._historyDeviceId ? this._devices.get(this._historyDeviceId) : null;
     const isWorking = device?.entities.get("state")?.state === "working";
-    const shouldAutoScroll = isInitialLoad || 
+    const shouldAutoScroll = (isInitialLoad && !isLoadMore) || 
       (hadNewMessages && (this._isAtBottom || (this._autoRefreshEnabled && isWorking)));
     
     if (shouldAutoScroll) {
@@ -863,15 +1178,22 @@ class OpenCodeCard extends HTMLElement {
     } else {
       const sortIcon = this._sortMode === "activity" ? "mdi:sort-clock-descending" : "mdi:sort-alphabetical-ascending";
       const sortTitle = this._sortMode === "activity" ? "Sorted by latest activity" : "Sorted by name";
+      const hideUnknownIcon = this._hideUnknown ? "mdi:eye-off" : "mdi:eye";
+      const hideUnknownTitle = this._hideUnknown ? "Showing active sessions only" : "Showing all sessions";
       content = `
         <ha-card>
           <div class="card-header">
             <div class="name">${title}</div>
-            ${this._devices.size > 1 ? `
-              <button class="sort-toggle" title="${sortTitle}">
-                <ha-icon icon="${sortIcon}"></ha-icon>
+            <div class="header-actions">
+              <button class="hide-unknown-toggle" title="${hideUnknownTitle}">
+                <ha-icon icon="${hideUnknownIcon}"></ha-icon>
               </button>
-            ` : ""}
+              ${this._devices.size > 1 ? `
+                <button class="sort-toggle" title="${sortTitle}">
+                  <ha-icon icon="${sortIcon}"></ha-icon>
+                </button>
+              ` : ""}
+            </div>
           </div>
           <div class="card-content">
             ${this._devices.size === 0 ? this._renderEmpty() : this._renderDevices()}
@@ -882,6 +1204,10 @@ class OpenCodeCard extends HTMLElement {
 
     if (this._showPermissionModal && this._activePermission) {
       content += this._renderPermissionModal(this._activePermission);
+    }
+
+    if (this._showQuestionModal && this._activeQuestion) {
+      content += this._renderQuestionModal();
     }
 
     if (this._showHistoryView) {
@@ -902,7 +1228,8 @@ class OpenCodeCard extends HTMLElement {
     if (!this._isPinned() && !this._selectedDeviceId) {
       this.querySelectorAll(".device-card[data-device-id]").forEach((el) => {
         el.addEventListener("click", (e) => {
-          if ((e.target as HTMLElement).closest(".permission-alert")) {
+          if ((e.target as HTMLElement).closest(".permission-alert") || 
+              (e.target as HTMLElement).closest(".question-alert")) {
             return;
           }
           const deviceId = (el as HTMLElement).dataset.deviceId;
@@ -917,8 +1244,23 @@ class OpenCodeCard extends HTMLElement {
       this._goBack();
     });
 
+    // Child session item clicks
+    this.querySelectorAll(".child-session-item[data-device-id]").forEach((el) => {
+      el.addEventListener("click", () => {
+        const deviceId = (el as HTMLElement).dataset.deviceId;
+        if (deviceId) {
+          this._selectDevice(deviceId);
+        }
+      });
+    });
+
     this.querySelector(".sort-toggle")?.addEventListener("click", () => {
       this._sortMode = this._sortMode === "activity" ? "name" : "activity";
+      this._render();
+    });
+
+    this.querySelector(".hide-unknown-toggle")?.addEventListener("click", () => {
+      this._hideUnknown = !this._hideUnknown;
       this._render();
     });
 
@@ -945,14 +1287,95 @@ class OpenCodeCard extends HTMLElement {
       });
     });
 
-    this.querySelector(".modal-backdrop:not(.history-modal-backdrop)")?.addEventListener("click", (e) => {
+    // Question alert click handlers
+    this.querySelectorAll(".question-alert[data-device-id]").forEach((el) => {
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const deviceId = (el as HTMLElement).dataset.deviceId;
+        if (deviceId) {
+          this._showQuestion(deviceId);
+        }
+      });
+    });
+
+    this.querySelector(".modal-backdrop:not(.history-modal-backdrop):not(.question-modal-backdrop)")?.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).classList.contains("modal-backdrop")) {
         this._hidePermissionModal();
       }
     });
 
-    this.querySelector(".modal-close:not(.history-close)")?.addEventListener("click", () => {
+    this.querySelector(".modal-close:not(.history-close):not(.question-close)")?.addEventListener("click", () => {
       this._hidePermissionModal();
+    });
+
+    // Question modal handlers
+    this.querySelector(".question-modal-backdrop")?.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).classList.contains("question-modal-backdrop")) {
+        this._hideQuestionModal();
+      }
+    });
+
+    this.querySelector(".question-close")?.addEventListener("click", () => {
+      this._hideQuestionModal();
+    });
+
+    this.querySelector(".btn-cancel-question")?.addEventListener("click", () => {
+      this._cancelQuestion();
+    });
+
+    this.querySelector(".btn-prev-question")?.addEventListener("click", () => {
+      this._prevQuestion();
+    });
+
+    this.querySelector(".btn-next-question")?.addEventListener("click", () => {
+      this._nextQuestion();
+    });
+
+    this.querySelector(".btn-submit-question")?.addEventListener("click", () => {
+      this._submitQuestionAnswers();
+    });
+
+    // Question option inputs
+    this.querySelectorAll(".question-input").forEach((input) => {
+      input.addEventListener("change", (e) => {
+        const target = e.target as HTMLInputElement;
+        const label = target.dataset.label || "";
+        this._updateQuestionAnswer(label, target.checked);
+      });
+    });
+
+    this.querySelector(".question-other-input")?.addEventListener("input", (e) => {
+      const value = (e.target as HTMLInputElement).value;
+      this._updateOtherInput(value);
+    });
+
+    // Inline question handlers
+    this.querySelectorAll("[data-action='open-question-modal']").forEach((el) => {
+      el.addEventListener("click", () => {
+        const deviceId = (el as HTMLElement).dataset.deviceId;
+        if (deviceId) {
+          this._showQuestion(deviceId);
+        }
+      });
+    });
+
+    this.querySelectorAll("[data-action='cancel-question']").forEach((el) => {
+      el.addEventListener("click", () => {
+        this._cancelQuestion();
+      });
+    });
+
+    this.querySelectorAll("[data-action='submit-inline-question']").forEach((el) => {
+      el.addEventListener("click", () => {
+        this._submitInlineQuestion();
+      });
+    });
+
+    // Inline question option changes
+    this.querySelectorAll(".inline-question-input").forEach((input) => {
+      input.addEventListener("change", () => {
+        // Track inline selections separately for simple submit
+      });
     });
 
     this.querySelector(".btn-allow-once")?.addEventListener("click", () => {
@@ -1248,33 +1671,61 @@ class OpenCodeCard extends HTMLElement {
     this._copyToClipboard(selectedText);
   }
 
-  private _loadMoreHistory() {
-    if (!this._historyData || this._historyLoadingMore) return;
+  private async _loadMoreHistory() {
+    if (!this._historyData || this._historyLoadingMore || !this._hass || !this._historySessionId) return;
     
-    const totalMessages = this._historyData.messages.length;
-    const currentStart = Math.max(0, totalMessages - this._historyVisibleCount);
+    // Check if there are more messages on the server
+    const totalOnServer = this._historyData.total_count ?? this._historyData.messages.length;
+    const currentLoaded = this._historyData.messages.length;
     
-    if (currentStart <= 0) return;
+    if (currentLoaded >= totalOnServer) {
+      // All messages already loaded, just increase visible count if needed
+      const totalMessages = this._historyData.messages.length;
+      const currentStart = Math.max(0, totalMessages - this._historyVisibleCount);
+      
+      if (currentStart <= 0) return;
+      
+      this._historyVisibleCount += OpenCodeCard.HISTORY_PAGE_SIZE;
+      this._render();
+      return;
+    }
     
+    // Need to fetch more from server - fetch all remaining messages
     this._historyLoadingMore = true;
     this._render();
     
-    setTimeout(() => {
-      this._historyVisibleCount += OpenCodeCard.HISTORY_PAGE_SIZE;
+    const historyBody = this.querySelector(".history-body");
+    const previousScrollHeight = historyBody?.scrollHeight || 0;
+    
+    try {
+      // Fetch all messages (no limit) to get the complete history
+      await this._hass.callService("opencode", "get_history", {
+        session_id: this._historySessionId,
+        request_id: `loadmore_${Date.now()}`,
+      });
+      // Response will be handled by _handleHistoryResponse
+      // The loading state will be cleared there
+      
+      // Wait a bit for the response to arrive
+      setTimeout(() => {
+        if (this._historyLoadingMore) {
+          this._historyLoadingMore = false;
+          this._render();
+        }
+        
+        // Preserve scroll position
+        const newHistoryBody = this.querySelector(".history-body");
+        if (newHistoryBody && previousScrollHeight > 0) {
+          const newScrollHeight = newHistoryBody.scrollHeight;
+          const scrollDiff = newScrollHeight - previousScrollHeight;
+          newHistoryBody.scrollTop = scrollDiff;
+        }
+      }, 500);
+    } catch (err) {
+      console.error("[opencode-card] Failed to load more history:", err);
       this._historyLoadingMore = false;
-      
-      const historyBody = this.querySelector(".history-body");
-      const previousScrollHeight = historyBody?.scrollHeight || 0;
-      
       this._render();
-      
-      const newHistoryBody = this.querySelector(".history-body");
-      if (newHistoryBody && previousScrollHeight > 0) {
-        const newScrollHeight = newHistoryBody.scrollHeight;
-        const scrollDiff = newScrollHeight - previousScrollHeight;
-        newHistoryBody.scrollTop = scrollDiff;
-      }
-    }, 100);
+    }
   }
 
   private _renderPermissionModal(permission: PermissionDetails): string {
@@ -1337,6 +1788,108 @@ class OpenCodeCard extends HTMLElement {
               <ha-icon icon="mdi:check-all"></ha-icon>
               Always Allow
             </button>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  private _renderQuestionModal(): string {
+    if (!this._activeQuestion || this._activeQuestion.questions.length === 0) {
+      return "";
+    }
+
+    const questions = this._activeQuestion.questions;
+    const currentQ = questions[this._currentQuestionIndex];
+    const totalQuestions = questions.length;
+    const isLastQuestion = this._currentQuestionIndex === totalQuestions - 1;
+    const isFirstQuestion = this._currentQuestionIndex === 0;
+    
+    // Initialize answers array if needed
+    if (this._questionAnswers.length !== totalQuestions) {
+      this._questionAnswers = questions.map(() => []);
+      this._otherInputs = questions.map(() => "");
+    }
+    
+    const currentAnswers = this._questionAnswers[this._currentQuestionIndex] || [];
+    const currentOther = this._otherInputs[this._currentQuestionIndex] || "";
+    const hasOtherSelected = currentAnswers.includes("__other__");
+
+    return `
+      <div class="modal-backdrop question-modal-backdrop">
+        <div class="modal question-modal">
+          <div class="modal-header question-header">
+            <ha-icon icon="mdi:comment-question"></ha-icon>
+            <span class="modal-title">${currentQ.header || "Question"}</span>
+            ${totalQuestions > 1 ? `<span class="question-progress">${this._currentQuestionIndex + 1} / ${totalQuestions}</span>` : ""}
+            <button class="modal-close question-close">
+              <ha-icon icon="mdi:close"></ha-icon>
+            </button>
+          </div>
+          <div class="modal-body question-body">
+            <div class="question-text">${currentQ.question}</div>
+            <div class="question-options">
+              ${currentQ.options.map((opt, idx) => {
+                const optId = `q-${this._currentQuestionIndex}-opt-${idx}`;
+                const isSelected = currentAnswers.includes(opt.label);
+                return `
+                  <div class="question-option ${isSelected ? "selected" : ""}">
+                    <input type="${currentQ.multiple ? "checkbox" : "radio"}" 
+                           name="question-${this._currentQuestionIndex}" 
+                           id="${optId}"
+                           class="question-input"
+                           data-label="${this._escapeHtml(opt.label)}"
+                           ${isSelected ? "checked" : ""}>
+                    <label for="${optId}" class="question-option-label">
+                      <span class="question-option-text">${opt.label}</span>
+                      ${opt.description ? `<span class="question-option-desc">${opt.description}</span>` : ""}
+                    </label>
+                  </div>
+                `;
+              }).join("")}
+              <div class="question-option other-option ${hasOtherSelected ? "selected" : ""}">
+                <input type="${currentQ.multiple ? "checkbox" : "radio"}" 
+                       name="question-${this._currentQuestionIndex}" 
+                       id="q-${this._currentQuestionIndex}-other"
+                       class="question-input question-other-check"
+                       data-label="__other__"
+                       ${hasOtherSelected ? "checked" : ""}>
+                <label for="q-${this._currentQuestionIndex}-other" class="question-option-label">
+                  <span class="question-option-text">Other</span>
+                </label>
+              </div>
+              ${hasOtherSelected ? `
+                <div class="question-other-input-container">
+                  <input type="text" 
+                         class="question-other-input" 
+                         placeholder="Enter your answer..."
+                         value="${this._escapeHtml(currentOther)}">
+                </div>
+              ` : ""}
+            </div>
+          </div>
+          <div class="modal-actions question-actions">
+            <button class="btn btn-cancel-question">
+              <ha-icon icon="mdi:close"></ha-icon>
+              Cancel
+            </button>
+            ${!isFirstQuestion ? `
+              <button class="btn btn-prev-question">
+                <ha-icon icon="mdi:chevron-left"></ha-icon>
+                Previous
+              </button>
+            ` : ""}
+            ${isLastQuestion ? `
+              <button class="btn btn-submit-question">
+                <ha-icon icon="mdi:send"></ha-icon>
+                Submit
+              </button>
+            ` : `
+              <button class="btn btn-next-question">
+                Next
+                <ha-icon icon="mdi:chevron-right"></ha-icon>
+              </button>
+            `}
           </div>
         </div>
       </div>
@@ -1449,24 +2002,33 @@ class OpenCodeCard extends HTMLElement {
     }
 
     const totalMessages = this._historyData.messages.length;
+    const totalOnServer = this._historyData.total_count ?? totalMessages;
     const startIndex = Math.max(0, totalMessages - this._historyVisibleCount);
     const visibleMessages = this._historyData.messages.slice(startIndex);
-    const hasMore = startIndex > 0;
+    
+    // Show "load more" if there are hidden messages locally OR more on server
+    const hasMoreLocal = startIndex > 0;
+    const hasMoreOnServer = totalMessages < totalOnServer;
+    const hasMore = hasMoreLocal || hasMoreOnServer;
 
     let html = "";
 
     if (hasMore) {
-      const remainingCount = startIndex;
+      const remainingLocal = startIndex;
+      const remainingOnServer = totalOnServer - totalMessages;
+      const remainingTotal = remainingLocal + remainingOnServer;
+      
       html += `
         <div class="history-load-more" data-action="load-more">
           <ha-icon icon="${this._historyLoadingMore ? "mdi:loading" : "mdi:chevron-up"}" class="${this._historyLoadingMore ? "spinning" : ""}"></ha-icon>
-          <span>${this._historyLoadingMore ? "Loading..." : `Load ${Math.min(remainingCount, OpenCodeCard.HISTORY_PAGE_SIZE)} more (${remainingCount} remaining)`}</span>
+          <span>${this._historyLoadingMore ? "Loading..." : `Load more (${remainingTotal} older messages)`}</span>
         </div>
       `;
     }
 
     html += visibleMessages.map(msg => this._renderHistoryMessage(msg)).join("");
     html += this._renderInlinePermission();
+    html += this._renderInlineQuestion();
 
     return html;
   }
@@ -1532,6 +2094,92 @@ class OpenCodeCard extends HTMLElement {
             <ha-icon icon="mdi:check-all"></ha-icon>
             Always
           </button>
+        </div>
+      </div>
+    `;
+  }
+
+  private _renderInlineQuestion(): string {
+    if (!this._historyDeviceId) return "";
+    
+    const device = this._devices.get(this._historyDeviceId);
+    if (!device) return "";
+    
+    const stateEntity = device.entities.get("state");
+    const currentState = stateEntity?.state ?? "unknown";
+    
+    if (currentState !== "waiting_input") return "";
+    
+    const question = this._pendingQuestions.get(this._historyDeviceId);
+    const hasQuestions = question && question.questions.length > 0;
+    
+    if (!hasQuestions) {
+      return `
+        <div class="inline-question">
+          <div class="inline-question-header">
+            <ha-icon icon="mdi:comment-question"></ha-icon>
+            <span class="inline-question-title">Awaiting Input</span>
+          </div>
+          <div class="inline-question-body">
+            <div class="inline-question-loading">
+              <ha-icon icon="mdi:loading" class="spinning"></ha-icon>
+              <span>Loading question...</span>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+    
+    // Show first question inline, with button to open full modal
+    const firstQuestion = question.questions[0];
+    const totalQuestions = question.questions.length;
+    
+    return `
+      <div class="inline-question">
+        <div class="inline-question-header">
+          <ha-icon icon="mdi:comment-question"></ha-icon>
+          <span class="inline-question-title">${firstQuestion.header || "Question"}</span>
+          ${totalQuestions > 1 ? `<span class="inline-question-count">${totalQuestions} questions</span>` : ""}
+        </div>
+        <div class="inline-question-body">
+          <div class="inline-question-text">${firstQuestion.question}</div>
+          <div class="inline-question-options">
+            ${firstQuestion.options.slice(0, 3).map((opt, idx) => `
+              <div class="inline-question-option" data-option-index="${idx}">
+                <input type="${firstQuestion.multiple ? "checkbox" : "radio"}" 
+                       name="inline-q-0" 
+                       id="inline-opt-${idx}" 
+                       class="inline-question-input"
+                       data-label="${this._escapeHtml(opt.label)}">
+                <label for="inline-opt-${idx}" class="inline-question-label">
+                  <span class="option-label">${opt.label}</span>
+                  ${opt.description ? `<span class="option-desc">${opt.description}</span>` : ""}
+                </label>
+              </div>
+            `).join("")}
+            ${firstQuestion.options.length > 3 ? `
+              <div class="inline-question-more">
+                +${firstQuestion.options.length - 3} more options
+              </div>
+            ` : ""}
+          </div>
+        </div>
+        <div class="inline-question-actions">
+          <button class="inline-question-btn cancel" data-action="cancel-question">
+            <ha-icon icon="mdi:close"></ha-icon>
+            Cancel
+          </button>
+          ${totalQuestions > 1 || firstQuestion.options.length > 3 ? `
+            <button class="inline-question-btn open-modal" data-action="open-question-modal" data-device-id="${this._historyDeviceId}">
+              <ha-icon icon="mdi:arrow-expand"></ha-icon>
+              ${totalQuestions > 1 ? "Answer All" : "View All Options"}
+            </button>
+          ` : `
+            <button class="inline-question-btn submit" data-action="submit-inline-question">
+              <ha-icon icon="mdi:send"></ha-icon>
+              Submit
+            </button>
+          `}
         </div>
       </div>
     `;
@@ -1629,7 +2277,19 @@ class OpenCodeCard extends HTMLElement {
   }
 
   private _renderDevices(): string {
-    let devices = Array.from(this._devices.values());
+    // Known active states
+    const knownStates = ["idle", "working", "waiting_permission", "waiting_input", "error"];
+    
+    // Filter out sub-agent sessions (those with a parent) from the main list
+    let devices = Array.from(this._devices.values()).filter(d => !d.parentSessionId);
+    
+    // Optionally filter out unknown/unavailable state sessions
+    if (this._hideUnknown) {
+      devices = devices.filter(d => {
+        const state = d.entities.get("state")?.state ?? "";
+        return knownStates.includes(state);
+      });
+    }
     
     if (this._sortMode === "activity") {
       devices.sort((a, b) => {
@@ -1638,7 +2298,14 @@ class OpenCodeCard extends HTMLElement {
         if (!aActivity && !bActivity) return 0;
         if (!aActivity) return 1;
         if (!bActivity) return -1;
-        return new Date(bActivity).getTime() - new Date(aActivity).getTime();
+        // Parse as dates and compare timestamps
+        const aTime = new Date(aActivity).getTime();
+        const bTime = new Date(bActivity).getTime();
+        // Handle invalid dates
+        if (isNaN(aTime) && isNaN(bTime)) return 0;
+        if (isNaN(aTime)) return 1;
+        if (isNaN(bTime)) return -1;
+        return bTime - aTime;
       });
     } else {
       devices.sort((a, b) => {
@@ -1674,6 +2341,10 @@ class OpenCodeCard extends HTMLElement {
     const agent = (stateEntity?.attributes?.agent as string) || null;
     const currentAgent = (stateEntity?.attributes?.current_agent as string) || null;
     const hostname = (stateEntity?.attributes?.hostname as string) || null;
+    
+    // Check for sub-agent sessions
+    const childSessions = this._getChildSessions(device.sessionId);
+    const isSubAgent = !!device.parentSessionId;
 
     let activityDisplay = "";
     if (lastActivity) {
@@ -1708,16 +2379,119 @@ class OpenCodeCard extends HTMLElement {
       `;
     }
 
-    const backButtonHtml = showBackButton ? `
+    // Question alert (for waiting_input state)
+    const question = this._getQuestionDetails(device);
+    let questionHtml = "";
+    if (question && question.questions.length > 0) {
+      const firstQuestion = question.questions[0];
+      questionHtml = `
+        <div class="question-alert pinned clickable" data-device-id="${device.deviceId}">
+          <ha-icon icon="mdi:comment-question"></ha-icon>
+          <div class="question-details">
+            <div class="question-title">${firstQuestion.header || "Question"}</div>
+            <div class="question-preview">${question.questions.length > 1 ? `${question.questions.length} questions` : "Tap to answer"}</div>
+          </div>
+          <ha-icon icon="mdi:chevron-right" class="question-chevron"></ha-icon>
+        </div>
+      `;
+    } else if (state === "waiting_input") {
+      questionHtml = `
+        <div class="question-alert pinned clickable" data-device-id="${device.deviceId}">
+          <ha-icon icon="mdi:comment-question"></ha-icon>
+          <div class="question-details">
+            <div class="question-title">Input Required</div>
+            <div class="question-preview">Loading question...</div>
+          </div>
+          <ha-icon icon="mdi:chevron-right" class="question-chevron"></ha-icon>
+        </div>
+      `;
+    }
+
+    // Show back button if explicitly requested OR if this is a sub-agent session
+    const shouldShowBackButton = showBackButton || isSubAgent;
+    const backButtonLabel = isSubAgent ? "Parent Session" : "Back";
+    const backButtonHtml = shouldShowBackButton ? `
       <button class="back-button" data-action="back">
         <ha-icon icon="mdi:arrow-left"></ha-icon>
-        <span>Back</span>
+        <span>${backButtonLabel}</span>
       </button>
     ` : "";
+    
+    // Sub-agent indicator badge
+    const subAgentBadgeHtml = isSubAgent ? `
+      <div class="sub-agent-badge">
+        <ha-icon icon="mdi:source-branch"></ha-icon>
+        <span>Sub-agent Session</span>
+      </div>
+    ` : "";
+    
+    // Child sessions section
+    // Separate active and inactive child sessions
+    const activeStates = ["working", "waiting_permission", "waiting_input"];
+    const activeChildren = childSessions.filter(c => activeStates.includes(c.entities.get("state")?.state ?? ""));
+    const inactiveChildren = childSessions.filter(c => !activeStates.includes(c.entities.get("state")?.state ?? ""));
+    
+    const renderChildItem = (child: OpenCodeDevice, isActive: boolean) => {
+      const childState = child.entities.get("state")?.state ?? "unknown";
+      const childStateConfig = STATE_CONFIG[childState] || STATE_CONFIG.unknown;
+      const childTitle = child.entities.get("session_title")?.state ?? "Unknown";
+      const childActivity = child.entities.get("last_activity")?.state ?? "";
+      const activityTime = childActivity ? formatRelativeTime(childActivity) : null;
+      const childTool = child.entities.get("current_tool")?.state ?? "none";
+      
+      return `
+        <div class="child-session-item clickable ${isActive ? 'active' : ''}" data-device-id="${child.deviceId}">
+          <div class="child-session-status ${childState === 'working' ? 'pulse' : ''}">
+            <ha-icon icon="${childStateConfig.icon}" style="color: ${childStateConfig.color}"></ha-icon>
+          </div>
+          <div class="child-session-info">
+            <div class="child-session-title">${childTitle}</div>
+            ${isActive && childTool !== "none" ? `<div class="child-session-tool"><ha-icon icon="mdi:tools"></ha-icon> ${childTool}</div>` : ""}
+            ${!isActive && activityTime ? `<div class="child-session-activity">${activityTime.display}</div>` : ""}
+          </div>
+          <ha-icon icon="mdi:chevron-right" class="child-session-chevron"></ha-icon>
+        </div>
+      `;
+    };
+    
+    let childSessionsHtml = "";
+    
+    // Active sub-agents section (shown prominently)
+    if (activeChildren.length > 0) {
+      const activeItems = activeChildren.map(child => renderChildItem(child, true)).join("");
+      childSessionsHtml += `
+        <div class="child-sessions-section active-section">
+          <div class="child-sessions-header active">
+            <ha-icon icon="mdi:run-fast"></ha-icon>
+            <span>Active Sub-agents (${activeChildren.length})</span>
+          </div>
+          <div class="child-sessions-list">
+            ${activeItems}
+          </div>
+        </div>
+      `;
+    }
+    
+    // Inactive sub-agents section (collapsed style)
+    if (inactiveChildren.length > 0) {
+      const inactiveItems = inactiveChildren.map(child => renderChildItem(child, false)).join("");
+      childSessionsHtml += `
+        <div class="child-sessions-section">
+          <div class="child-sessions-header">
+            <ha-icon icon="mdi:source-branch"></ha-icon>
+            <span>Sub-agent History (${inactiveChildren.length})</span>
+          </div>
+          <div class="child-sessions-list">
+            ${inactiveItems}
+          </div>
+        </div>
+      `;
+    }
 
     return `
       <div class="detail-view">
         ${backButtonHtml}
+        ${subAgentBadgeHtml}
         <div class="detail-header">
           <div class="detail-status ${state === 'working' ? 'pulse' : ''}" style="background: ${stateConfig.color}20; border-color: ${stateConfig.color}">
             <ha-icon icon="${stateConfig.icon}" style="color: ${stateConfig.color}"></ha-icon>
@@ -1735,6 +2509,7 @@ class OpenCodeCard extends HTMLElement {
         </div>
 
         ${permissionHtml}
+        ${questionHtml}
 
         <div class="detail-info">
           <div class="detail-row">
@@ -1762,6 +2537,8 @@ class OpenCodeCard extends HTMLElement {
             <span class="detail-value">${activityDisplay || "—"}</span>
           </div>
         </div>
+
+        ${childSessionsHtml}
 
         <div class="detail-stats">
           <div class="stat">
@@ -1915,7 +2692,13 @@ class OpenCodeCard extends HTMLElement {
         font-size: 1.2em;
         font-weight: 500;
       }
-      .sort-toggle {
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .sort-toggle,
+      .hide-unknown-toggle {
         background: none;
         border: none;
         padding: 8px;
@@ -1924,11 +2707,13 @@ class OpenCodeCard extends HTMLElement {
         color: var(--secondary-text-color);
         transition: background 0.2s, color 0.2s;
       }
-      .sort-toggle:hover {
+      .sort-toggle:hover,
+      .hide-unknown-toggle:hover {
         background: var(--secondary-background-color);
         color: var(--primary-text-color);
       }
-      .sort-toggle ha-icon {
+      .sort-toggle ha-icon,
+      .hide-unknown-toggle ha-icon {
         --mdc-icon-size: 20px;
       }
       .card-content {
@@ -2237,6 +3022,118 @@ class OpenCodeCard extends HTMLElement {
       .sub-agent-indicator ha-icon {
         --mdc-icon-size: 14px;
       }
+      
+      /* Sub-agent badge for sub-agent sessions */
+      .sub-agent-badge {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 12px;
+        background: var(--info-color, #039be5)15;
+        border: 1px solid var(--info-color, #039be5)40;
+        border-radius: 8px;
+        margin-bottom: 16px;
+        color: var(--info-color, #039be5);
+        font-size: 0.85em;
+      }
+      .sub-agent-badge ha-icon {
+        --mdc-icon-size: 16px;
+      }
+      
+      /* Child sessions section */
+      .child-sessions-section {
+        margin-bottom: 16px;
+        border: 1px solid var(--divider-color);
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .child-sessions-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 12px;
+        background: var(--secondary-background-color);
+        font-weight: 500;
+        font-size: 0.9em;
+      }
+      .child-sessions-header ha-icon {
+        --mdc-icon-size: 18px;
+        color: var(--primary-color);
+      }
+      .child-sessions-list {
+        display: flex;
+        flex-direction: column;
+      }
+      .child-session-item {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 12px;
+        border-top: 1px solid var(--divider-color);
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+      .child-session-item:hover {
+        background: var(--secondary-background-color);
+      }
+      .child-session-status {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .child-session-status ha-icon {
+        --mdc-icon-size: 20px;
+      }
+      .child-session-info {
+        flex: 1;
+        min-width: 0;
+      }
+      .child-session-title {
+        font-size: 0.95em;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .child-session-activity {
+        font-size: 0.8em;
+        color: var(--secondary-text-color);
+        margin-top: 2px;
+      }
+      .child-session-tool {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 0.8em;
+        color: var(--primary-color);
+        margin-top: 2px;
+      }
+      .child-session-tool ha-icon {
+        --mdc-icon-size: 12px;
+      }
+      .child-session-chevron {
+        --mdc-icon-size: 20px;
+        color: var(--secondary-text-color);
+      }
+      
+      /* Active sub-agents section */
+      .child-sessions-section.active-section {
+        border-color: var(--primary-color);
+        margin-bottom: 12px;
+      }
+      .child-sessions-header.active {
+        background: var(--primary-color)15;
+        color: var(--primary-color);
+      }
+      .child-sessions-header.active ha-icon {
+        color: var(--primary-color);
+      }
+      .child-session-item.active {
+        background: var(--primary-color)08;
+      }
+      .child-session-item.active:hover {
+        background: var(--primary-color)15;
+      }
+      
       .detail-stats {
         display: flex;
         justify-content: space-around;
@@ -2930,6 +3827,275 @@ class OpenCodeCard extends HTMLElement {
         background: #2196f320;
         color: #2196f3;
       }
+
+      /* Question alert styles */
+      .question-alert {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-top: 12px;
+        padding: 12px;
+        background: #9c27b020;
+        border: 1px solid #9c27b0;
+        border-radius: 8px;
+      }
+      .question-alert.clickable {
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+      .question-alert.clickable:hover {
+        background: #9c27b030;
+      }
+      .question-alert > ha-icon:first-child {
+        --mdc-icon-size: 24px;
+        color: #9c27b0;
+      }
+      .question-details {
+        flex: 1;
+      }
+      .question-title {
+        font-weight: 500;
+      }
+      .question-preview {
+        font-size: 0.85em;
+        color: var(--secondary-text-color);
+      }
+      .question-chevron {
+        --mdc-icon-size: 20px;
+        color: var(--secondary-text-color);
+      }
+
+      /* Question modal styles */
+      .question-modal {
+        max-width: 500px;
+        width: 95%;
+      }
+      .question-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+      .question-header ha-icon:first-child {
+        --mdc-icon-size: 24px;
+        color: #9c27b0;
+      }
+      .question-progress {
+        margin-left: auto;
+        margin-right: 8px;
+        padding: 4px 8px;
+        background: var(--secondary-background-color);
+        border-radius: 12px;
+        font-size: 0.85em;
+        color: var(--secondary-text-color);
+      }
+      .question-body {
+        padding: 16px;
+      }
+      .question-text {
+        font-size: 1.05em;
+        margin-bottom: 16px;
+        line-height: 1.5;
+      }
+      .question-options {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .question-option {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 12px;
+        background: var(--secondary-background-color);
+        border: 2px solid transparent;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: background 0.2s, border-color 0.2s;
+      }
+      .question-option:hover {
+        background: var(--divider-color);
+      }
+      .question-option.selected {
+        border-color: #9c27b0;
+        background: #9c27b010;
+      }
+      .question-option.other-option {
+        border-style: dashed;
+      }
+      .question-input {
+        margin-top: 2px;
+        accent-color: #9c27b0;
+      }
+      .question-option-label {
+        flex: 1;
+        cursor: pointer;
+      }
+      .question-option-text {
+        display: block;
+        font-weight: 500;
+      }
+      .question-option-desc {
+        display: block;
+        font-size: 0.85em;
+        color: var(--secondary-text-color);
+        margin-top: 4px;
+      }
+      .question-other-input-container {
+        padding: 0 12px 12px;
+      }
+      .question-other-input {
+        width: 100%;
+        padding: 12px;
+        border: 1px solid var(--divider-color);
+        border-radius: 8px;
+        background: var(--card-background-color);
+        color: var(--primary-text-color);
+        font-size: 1em;
+      }
+      .question-other-input:focus {
+        outline: none;
+        border-color: #9c27b0;
+      }
+      .question-actions {
+        display: flex;
+        gap: 12px;
+        padding: 16px;
+        border-top: 1px solid var(--divider-color);
+      }
+      .btn-cancel-question {
+        background: #f4433620;
+        color: #f44336;
+      }
+      .btn-prev-question {
+        background: var(--secondary-background-color);
+        color: var(--primary-text-color);
+      }
+      .btn-next-question {
+        flex: 1;
+        background: #9c27b020;
+        color: #9c27b0;
+      }
+      .btn-submit-question {
+        flex: 1;
+        background: #4caf50;
+        color: white;
+      }
+
+      /* Inline question styles */
+      .inline-question {
+        margin: 16px 0;
+        padding: 16px;
+        background: #9c27b015;
+        border: 1px solid #9c27b0;
+        border-radius: 12px;
+      }
+      .inline-question-header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        margin-bottom: 12px;
+      }
+      .inline-question-header ha-icon {
+        --mdc-icon-size: 24px;
+        color: #9c27b0;
+      }
+      .inline-question-title {
+        font-weight: 500;
+        font-size: 1.1em;
+        flex: 1;
+      }
+      .inline-question-count {
+        padding: 4px 8px;
+        background: #9c27b020;
+        border-radius: 12px;
+        font-size: 0.8em;
+        color: #9c27b0;
+      }
+      .inline-question-body {
+        margin-bottom: 16px;
+      }
+      .inline-question-text {
+        font-size: 1em;
+        margin-bottom: 12px;
+        line-height: 1.5;
+      }
+      .inline-question-options {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .inline-question-option {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        padding: 10px;
+        background: var(--card-background-color);
+        border-radius: 8px;
+      }
+      .inline-question-input {
+        margin-top: 2px;
+        accent-color: #9c27b0;
+      }
+      .inline-question-label {
+        flex: 1;
+        cursor: pointer;
+      }
+      .inline-question-label .option-label {
+        display: block;
+        font-weight: 500;
+      }
+      .inline-question-label .option-desc {
+        display: block;
+        font-size: 0.85em;
+        color: var(--secondary-text-color);
+        margin-top: 2px;
+      }
+      .inline-question-more {
+        padding: 10px;
+        text-align: center;
+        color: var(--secondary-text-color);
+        font-size: 0.9em;
+        font-style: italic;
+      }
+      .inline-question-loading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--secondary-text-color);
+        font-size: 0.9em;
+      }
+      .inline-question-actions {
+        display: flex;
+        gap: 8px;
+      }
+      .inline-question-btn {
+        flex: 1;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        padding: 10px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 0.85em;
+        transition: opacity 0.2s;
+      }
+      .inline-question-btn ha-icon {
+        --mdc-icon-size: 16px;
+      }
+      .inline-question-btn.cancel {
+        background: #f4433620;
+        color: #f44336;
+      }
+      .inline-question-btn.open-modal {
+        background: #9c27b020;
+        color: #9c27b0;
+      }
+      .inline-question-btn.submit {
+        background: #4caf50;
+        color: white;
+      }
     `;
   }
 
@@ -2944,6 +4110,142 @@ class OpenCodeCard extends HTMLElement {
     };
   }
 }
+
+// Card Editor for visual configuration
+class OpenCodeCardEditor extends HTMLElement {
+  private _config?: CardConfig;
+  private _hass?: HomeAssistant;
+
+  set hass(hass: HomeAssistant) {
+    this._hass = hass;
+  }
+
+  setConfig(config: CardConfig) {
+    this._config = config;
+    this._render();
+  }
+
+  private _render() {
+    if (!this._config) return;
+
+    this.innerHTML = `
+      <style>
+        .editor-row {
+          display: flex;
+          flex-direction: column;
+          margin-bottom: 16px;
+        }
+        .editor-row label {
+          font-weight: 500;
+          margin-bottom: 4px;
+        }
+        .editor-row input[type="text"],
+        .editor-row input[type="number"],
+        .editor-row select {
+          padding: 8px;
+          border: 1px solid var(--divider-color);
+          border-radius: 4px;
+          background: var(--card-background-color);
+          color: var(--primary-text-color);
+        }
+        .editor-row .checkbox-row {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .editor-row .hint {
+          font-size: 0.85em;
+          color: var(--secondary-text-color);
+          margin-top: 4px;
+        }
+      </style>
+      
+      <div class="editor-row">
+        <label for="title">Title</label>
+        <input type="text" id="title" value="${this._config.title || ""}" placeholder="OpenCode Sessions">
+        <span class="hint">Card header title</span>
+      </div>
+      
+      <div class="editor-row">
+        <label for="device">Pin to Device (optional)</label>
+        <input type="text" id="device" value="${this._config.device || ""}" placeholder="Device ID">
+        <span class="hint">Pin card to a specific device ID</span>
+      </div>
+      
+      <div class="editor-row">
+        <label for="sort_by">Default Sort</label>
+        <select id="sort_by">
+          <option value="activity" ${this._config.sort_by !== "name" ? "selected" : ""}>By Activity (newest first)</option>
+          <option value="name" ${this._config.sort_by === "name" ? "selected" : ""}>By Name (alphabetical)</option>
+        </select>
+        <span class="hint">Default sorting for session list</span>
+      </div>
+      
+      <div class="editor-row">
+        <div class="checkbox-row">
+          <input type="checkbox" id="hide_unknown" ${this._config.hide_unknown ? "checked" : ""}>
+          <label for="hide_unknown">Hide unknown sessions by default</label>
+        </div>
+        <span class="hint">Hide sessions with unknown/unavailable state</span>
+      </div>
+      
+      <div class="editor-row">
+        <label for="working_refresh_interval">Auto-refresh Interval (seconds)</label>
+        <input type="number" id="working_refresh_interval" value="${this._config.working_refresh_interval || 10}" min="1" max="60">
+        <span class="hint">History refresh interval when session is working</span>
+      </div>
+    `;
+
+    this._attachListeners();
+  }
+
+  private _attachListeners() {
+    this.querySelector("#title")?.addEventListener("input", (e) => {
+      this._updateConfig("title", (e.target as HTMLInputElement).value || undefined);
+    });
+
+    this.querySelector("#device")?.addEventListener("input", (e) => {
+      this._updateConfig("device", (e.target as HTMLInputElement).value || undefined);
+    });
+
+    this.querySelector("#sort_by")?.addEventListener("change", (e) => {
+      const value = (e.target as HTMLSelectElement).value as "activity" | "name";
+      this._updateConfig("sort_by", value === "activity" ? undefined : value);
+    });
+
+    this.querySelector("#hide_unknown")?.addEventListener("change", (e) => {
+      this._updateConfig("hide_unknown", (e.target as HTMLInputElement).checked || undefined);
+    });
+
+    this.querySelector("#working_refresh_interval")?.addEventListener("input", (e) => {
+      const value = parseInt((e.target as HTMLInputElement).value, 10);
+      this._updateConfig("working_refresh_interval", isNaN(value) || value === 10 ? undefined : value);
+    });
+  }
+
+  private _updateConfig(key: string, value: unknown) {
+    if (!this._config) return;
+
+    const newConfig = { ...this._config };
+    if (value === undefined) {
+      delete (newConfig as Record<string, unknown>)[key];
+    } else {
+      (newConfig as Record<string, unknown>)[key] = value;
+    }
+
+    this._config = newConfig;
+
+    const event = new CustomEvent("config-changed", {
+      detail: { config: newConfig },
+      bubbles: true,
+      composed: true,
+    });
+    this.dispatchEvent(event);
+  }
+}
+
+// Register editor
+customElements.define("opencode-card-editor", OpenCodeCardEditor);
 
 // Register the card
 customElements.define("opencode-card", OpenCodeCard);

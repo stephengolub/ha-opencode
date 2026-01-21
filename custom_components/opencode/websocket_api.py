@@ -315,6 +315,7 @@ def _get_instance_id_by_token(hass: HomeAssistant, token: str) -> str | None:
         vol.Required("fetched_at"): str,
         vol.Optional("since"): str,
         vol.Optional("request_id"): str,
+        vol.Optional("total_count"): int,
     }
 )
 @websocket_api.async_response
@@ -346,6 +347,7 @@ async def handle_history_response(
                 "fetched_at": msg["fetched_at"],
                 "since": msg.get("since"),
                 "request_id": msg.get("request_id"),
+                "total_count": msg.get("total_count"),
             },
         },
     )
@@ -353,9 +355,10 @@ async def handle_history_response(
     connection.send_result(msg["id"], {"success": True})
 
     _LOGGER.debug(
-        "Received history for session %s: %d messages",
+        "Received history for session %s: %d messages (total: %s)",
         msg["session_id"],
         len(msg["messages"]),
+        msg.get("total_count", "unknown"),
     )
 
 

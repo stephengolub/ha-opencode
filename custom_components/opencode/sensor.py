@@ -22,7 +22,9 @@ from .const import (
     ATTR_ERROR_MESSAGE,
     ATTR_HOSTNAME,
     ATTR_INSTANCE_ID,
+    ATTR_PARENT_SESSION_ID,
     ATTR_PREVIOUS_STATE,
+    ATTR_QUESTION,
     ATTR_SESSION_ID,
     DOMAIN,
 )
@@ -178,6 +180,8 @@ class OpenCodeStateSensor(OpenCodeSensorBase):
             ATTR_ERROR_MESSAGE: session.error_message,
             ATTR_SESSION_ID: session.session_id,
             ATTR_INSTANCE_ID: session.instance_id,
+            ATTR_PARENT_SESSION_ID: session.parent_session_id,
+            ATTR_QUESTION: session.question,
         }
 
 
