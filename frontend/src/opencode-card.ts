@@ -2252,7 +2252,7 @@ class OpenCodeCard extends HTMLElement {
     
     const partsHtml = msg.parts.map(part => {
       if (part.type === "text" && part.content) {
-        return `<div class="history-text">${this._escapeHtml(part.content)}</div>`;
+        return `<div class="history-text markdown-content">${this._renderMarkdown(part.content)}</div>`;
       } else if (part.type === "tool_call") {
         const hasOutput = part.tool_output || part.tool_error;
         return `
@@ -2326,6 +2326,162 @@ class OpenCodeCard extends HTMLElement {
     const div = document.createElement("div");
     div.textContent = text;
     return div.innerHTML;
+  }
+
+  /**
+   * Render markdown to HTML. Supports:
+   * - Headers (h1-h6)
+   * - Bold, italic, strikethrough
+   * - Code blocks (fenced with ```) and inline code
+   * - Links
+   * - Lists (ordered and unordered)
+   * - Blockquotes
+   * - Horizontal rules
+   */
+  private _renderMarkdown(text: string): string {
+    // First, extract and protect code blocks from other processing
+    // Use \x00 (null char) as delimiter since it won't appear in normal text
+    const codeBlocks: string[] = [];
+    let processed = text.replace(/```(\w*)\n([\s\S]*?)```/g, (_match, lang, code) => {
+      const index = codeBlocks.length;
+      const escapedCode = this._escapeHtml(code.trimEnd());
+      const langClass = lang ? ` class="language-${lang}"` : "";
+      codeBlocks.push(`<pre><code${langClass}>${escapedCode}</code></pre>`);
+      return `\x00CB${index}\x00`;
+    });
+
+    // Protect inline code
+    const inlineCode: string[] = [];
+    processed = processed.replace(/`([^`]+)`/g, (_match, code) => {
+      const index = inlineCode.length;
+      inlineCode.push(`<code>${this._escapeHtml(code)}</code>`);
+      return `\x00IC${index}\x00`;
+    });
+
+    // Process line by line for block elements
+    const lines = processed.split("\n");
+    const result: string[] = [];
+    let inList = false;
+    let listType = "";
+    let inBlockquote = false;
+
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i];
+
+      // Horizontal rule
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+        if (inList) { result.push(listType === "ul" ? "</ul>" : "</ol>"); inList = false; }
+        if (inBlockquote) { result.push("</blockquote>"); inBlockquote = false; }
+        result.push("<hr>");
+        continue;
+      }
+
+      // Headers
+      const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+      if (headerMatch) {
+        if (inList) { result.push(listType === "ul" ? "</ul>" : "</ol>"); inList = false; }
+        if (inBlockquote) { result.push("</blockquote>"); inBlockquote = false; }
+        const level = headerMatch[1].length;
+        const content = this._processInlineMarkdown(headerMatch[2]);
+        result.push(`<h${level}>${content}</h${level}>`);
+        continue;
+      }
+
+      // Blockquote
+      const quoteMatch = line.match(/^>\s*(.*)$/);
+      if (quoteMatch) {
+        if (inList) { result.push(listType === "ul" ? "</ul>" : "</ol>"); inList = false; }
+        if (!inBlockquote) { result.push("<blockquote>"); inBlockquote = true; }
+        result.push(this._processInlineMarkdown(quoteMatch[1]) + "<br>");
+        continue;
+      } else if (inBlockquote) {
+        result.push("</blockquote>");
+        inBlockquote = false;
+      }
+
+      // Unordered list
+      const ulMatch = line.match(/^(\s*)[-*+]\s+(.+)$/);
+      if (ulMatch) {
+        if (!inList || listType !== "ul") {
+          if (inList) result.push(listType === "ul" ? "</ul>" : "</ol>");
+          result.push("<ul>");
+          inList = true;
+          listType = "ul";
+        }
+        result.push(`<li>${this._processInlineMarkdown(ulMatch[2])}</li>`);
+        continue;
+      }
+
+      // Ordered list
+      const olMatch = line.match(/^(\s*)\d+\.\s+(.+)$/);
+      if (olMatch) {
+        if (!inList || listType !== "ol") {
+          if (inList) result.push(listType === "ul" ? "</ul>" : "</ol>");
+          result.push("<ol>");
+          inList = true;
+          listType = "ol";
+        }
+        result.push(`<li>${this._processInlineMarkdown(olMatch[2])}</li>`);
+        continue;
+      }
+
+      // Close list if we're no longer in one
+      if (inList && line.trim() !== "") {
+        result.push(listType === "ul" ? "</ul>" : "</ol>");
+        inList = false;
+      }
+
+      // Empty line
+      if (line.trim() === "") {
+        if (inList) { result.push(listType === "ul" ? "</ul>" : "</ol>"); inList = false; }
+        result.push("<br>");
+        continue;
+      }
+
+      // Regular paragraph
+      result.push(`<p>${this._processInlineMarkdown(line)}</p>`);
+    }
+
+    // Close any open tags
+    if (inList) result.push(listType === "ul" ? "</ul>" : "</ol>");
+    if (inBlockquote) result.push("</blockquote>");
+
+    let html = result.join("\n");
+
+    // Restore code blocks
+    codeBlocks.forEach((block, i) => {
+      html = html.replace(`\x00CB${i}\x00`, block);
+    });
+
+    // Restore inline code
+    inlineCode.forEach((code, i) => {
+      html = html.replace(`\x00IC${i}\x00`, code);
+    });
+
+    return html;
+  }
+
+  /**
+   * Process inline markdown elements (bold, italic, links, etc.)
+   */
+  private _processInlineMarkdown(text: string): string {
+    let result = this._escapeHtml(text);
+
+    // Links: [text](url)
+    result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+    // Bold: **text** or __text__
+    result = result.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    result = result.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+
+    // Italic: *text* or _text_
+    result = result.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+    result = result.replace(/_([^_]+)_/g, "<em>$1</em>");
+
+    // Strikethrough: ~~text~~
+    result = result.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
+    return result;
   }
 
   private _renderEmpty(): string {
@@ -3650,8 +3806,88 @@ class OpenCodeCard extends HTMLElement {
         line-height: 1.5;
       }
       .history-text {
-        white-space: pre-wrap;
         word-break: break-word;
+      }
+      /* Markdown content styles */
+      .markdown-content {
+        line-height: 1.6;
+      }
+      .markdown-content p {
+        margin: 0 0 0.5em 0;
+      }
+      .markdown-content p:last-child {
+        margin-bottom: 0;
+      }
+      .markdown-content h1, .markdown-content h2, .markdown-content h3,
+      .markdown-content h4, .markdown-content h5, .markdown-content h6 {
+        margin: 0.8em 0 0.4em 0;
+        font-weight: 600;
+        line-height: 1.3;
+      }
+      .markdown-content h1 { font-size: 1.5em; }
+      .markdown-content h2 { font-size: 1.3em; }
+      .markdown-content h3 { font-size: 1.15em; }
+      .markdown-content h4 { font-size: 1.05em; }
+      .markdown-content h5 { font-size: 1em; }
+      .markdown-content h6 { font-size: 0.95em; color: var(--secondary-text-color); }
+      .markdown-content code {
+        background: var(--secondary-background-color);
+        padding: 0.15em 0.4em;
+        border-radius: 4px;
+        font-family: monospace;
+        font-size: 0.9em;
+      }
+      .markdown-content pre {
+        background: var(--secondary-background-color);
+        padding: 12px;
+        border-radius: 8px;
+        overflow-x: auto;
+        margin: 0.5em 0;
+      }
+      .markdown-content pre code {
+        background: none;
+        padding: 0;
+        font-size: 0.85em;
+        line-height: 1.5;
+      }
+      .markdown-content blockquote {
+        margin: 0.5em 0;
+        padding: 0.5em 1em;
+        border-left: 3px solid var(--primary-color);
+        background: var(--secondary-background-color);
+        border-radius: 0 4px 4px 0;
+      }
+      .markdown-content blockquote br:last-child {
+        display: none;
+      }
+      .markdown-content ul, .markdown-content ol {
+        margin: 0.5em 0;
+        padding-left: 1.5em;
+      }
+      .markdown-content li {
+        margin: 0.25em 0;
+      }
+      .markdown-content hr {
+        border: none;
+        border-top: 1px solid var(--divider-color);
+        margin: 1em 0;
+      }
+      .markdown-content a {
+        color: var(--primary-color);
+        text-decoration: none;
+      }
+      .markdown-content a:hover {
+        text-decoration: underline;
+      }
+      .markdown-content strong {
+        font-weight: 600;
+      }
+      .markdown-content em {
+        font-style: italic;
+      }
+      .markdown-content del {
+        text-decoration: line-through;
+        opacity: 0.7;
       }
       .history-tool {
         margin: 8px 0;
