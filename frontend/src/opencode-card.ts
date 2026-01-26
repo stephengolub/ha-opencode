@@ -267,6 +267,10 @@ class OpenCodeCard extends HTMLElement {
   private _chatInputSelectionEnd: number | null = null;
   // Scroll handling
   private _scrollDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Request timeout handling
+  private _historyRequestTimeout: ReturnType<typeof setTimeout> | null = null;
+  private _historyRequestId: string | null = null;
+  private static readonly HISTORY_REQUEST_TIMEOUT_MS = 15000; // 15 second timeout
 
   set hass(hass: HomeAssistant) {
     this._hass = hass;
@@ -1046,16 +1050,39 @@ class OpenCodeCard extends HTMLElement {
   private async _fetchFullHistory() {
     if (!this._hass || !this._historySessionId) return;
 
+    // Clear any existing timeout
+    if (this._historyRequestTimeout) {
+      clearTimeout(this._historyRequestTimeout);
+    }
+
+    const requestId = `req_${Date.now()}`;
+    this._historyRequestId = requestId;
+
+    // Set up timeout for the request
+    this._historyRequestTimeout = setTimeout(() => {
+      if (this._historyRequestId === requestId && this._historyLoading) {
+        console.warn("[opencode-card] History request timed out");
+        this._historyLoading = false;
+        this._historyRequestId = null;
+        this._render();
+      }
+    }, OpenCodeCard.HISTORY_REQUEST_TIMEOUT_MS);
+
     try {
       await this._hass.callService("opencode", "get_history", {
         session_id: this._historySessionId,
         limit: OpenCodeCard.HISTORY_PAGE_SIZE,
-        request_id: `req_${Date.now()}`,
+        request_id: requestId,
       });
       // Response comes via event subscription
     } catch (err) {
       console.error("[opencode-card] Failed to request history:", err);
+      if (this._historyRequestTimeout) {
+        clearTimeout(this._historyRequestTimeout);
+        this._historyRequestTimeout = null;
+      }
       this._historyLoading = false;
+      this._historyRequestId = null;
       this._render();
     }
   }
@@ -1063,19 +1090,50 @@ class OpenCodeCard extends HTMLElement {
   private async _fetchHistorySince(since: string) {
     if (!this._hass || !this._historySessionId) return;
 
+    // Clear any existing timeout
+    if (this._historyRequestTimeout) {
+      clearTimeout(this._historyRequestTimeout);
+    }
+
+    const requestId = `req_${Date.now()}`;
+    this._historyRequestId = requestId;
+
+    // Set up timeout for the request (shorter for incremental updates)
+    this._historyRequestTimeout = setTimeout(() => {
+      if (this._historyRequestId === requestId && this._historyLoading) {
+        console.warn("[opencode-card] History update request timed out");
+        this._historyLoading = false;
+        this._historyRequestId = null;
+        this._render();
+      }
+    }, OpenCodeCard.HISTORY_REQUEST_TIMEOUT_MS);
+
     try {
       await this._hass.callService("opencode", "get_history", {
         session_id: this._historySessionId,
         since,
-        request_id: `req_${Date.now()}`,
+        request_id: requestId,
       });
     } catch (err) {
       console.error("[opencode-card] Failed to request history update:", err);
+      if (this._historyRequestTimeout) {
+        clearTimeout(this._historyRequestTimeout);
+        this._historyRequestTimeout = null;
+      }
+      this._historyLoading = false;
+      this._historyRequestId = null;
     }
   }
 
   private _handleHistoryResponse(response: HistoryResponse) {
     if (!this._historySessionId) return;
+
+    // Clear the request timeout since we got a response
+    if (this._historyRequestTimeout) {
+      clearTimeout(this._historyRequestTimeout);
+      this._historyRequestTimeout = null;
+    }
+    this._historyRequestId = null;
 
     const hadNewMessages = response.since && response.messages.length > 0;
     const isInitialLoad = !this._historyData;

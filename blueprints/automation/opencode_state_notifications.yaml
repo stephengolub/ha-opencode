@@ -56,6 +56,16 @@ blueprint:
       selector:
         boolean:
     
+    notify_sub_agent_complete:
+      name: Notify on Sub-Agent Task Complete
+      description: >
+        Send notifications when sub-agent tasks complete. 
+        Sub-agents are spawned by the main agent for parallel work.
+        Disable this to only get notifications for main task completion.
+      default: true
+      selector:
+        boolean:
+    
     notification_channel:
       name: Notification Channel (Android)
       description: >
@@ -130,6 +140,13 @@ variables:
   
   # Determine if this is a transition we care about
   was_working: "{{ previous_state == 'working' }}"
+  
+  # Check if this is a sub-agent session
+  is_sub_agent: "{{ trigger.event.data.is_sub_agent | default(false) }}"
+  parent_session_id: "{{ trigger.event.data.parent_session_id | default('') }}"
+  
+  # Sub-agent notification preference
+  notify_sub_agents: !input notify_sub_agent_complete
   
   # Build detailed permission message content (without hostname prefix)
   permission_content: >
@@ -250,6 +267,8 @@ action:
             value_template: "{{ trigger_id == 'state_change' and new_state == 'idle' and was_working }}"
           - condition: template
             value_template: !input notify_on_complete
+          - condition: template
+            value_template: "{{ not is_sub_agent or notify_sub_agents }}"
         sequence:
           - service: !input notify_service
             data:

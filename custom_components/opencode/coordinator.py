@@ -298,6 +298,8 @@ class OpenCodeCoordinator:
                     "hostname": session.hostname,
                     "session_title": session.title,
                     "instance_id": instance_id,
+                    "parent_session_id": session.parent_session_id,
+                    "is_sub_agent": session.parent_session_id is not None,
                 },
             )
 
