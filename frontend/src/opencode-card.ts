@@ -2058,10 +2058,12 @@ class OpenCodeCard extends HTMLElement {
           </div>
           <div class="chat-input-container">
             ${this._renderAgentSelector()}
-            <textarea class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
-            <button class="chat-send-btn" title="Send message">
-              <ha-icon icon="mdi:send"></ha-icon>
-            </button>
+            <div class="chat-input-row">
+              <textarea class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+              <button class="chat-send-btn" title="Send message">
+                <ha-icon icon="mdi:send"></ha-icon>
+              </button>
+            </div>
           </div>
         </div>
       </div>
@@ -2071,8 +2073,11 @@ class OpenCodeCard extends HTMLElement {
   private _renderAgentSelector(): string {
     if (this._agentsLoading) {
       return `
-        <div class="agent-selector loading">
-          <ha-icon icon="mdi:loading" class="spinning"></ha-icon>
+        <div class="agent-selector-row">
+          <div class="agent-selector-loading">
+            <ha-icon icon="mdi:loading" class="spinning"></ha-icon>
+            <span>Loading agents...</span>
+          </div>
         </div>
       `;
     }
@@ -2089,15 +2094,20 @@ class OpenCodeCard extends HTMLElement {
     
     const options = selectableAgents.map(agent => {
       const selected = this._selectedAgent === agent.name ? "selected" : "";
-      const desc = agent.description ? ` - ${agent.description}` : "";
-      return `<option value="${agent.name}" ${selected}>${agent.name}${desc}</option>`;
+      return `<option value="${agent.name}" ${selected}>${agent.name}</option>`;
     }).join("");
     
     return `
-      <select class="agent-selector" title="Select agent">
-        <option value="" ${!this._selectedAgent ? "selected" : ""}>Default Agent</option>
-        ${options}
-      </select>
+      <div class="agent-selector-row">
+        <label class="agent-selector-label">
+          <ha-icon icon="mdi:robot"></ha-icon>
+          <span>Agent:</span>
+        </label>
+        <select class="agent-selector" title="Select agent">
+          <option value="" ${!this._selectedAgent ? "selected" : ""}>Default</option>
+          ${options}
+        </select>
+      </div>
     `;
   }
 
@@ -4009,34 +4019,52 @@ class OpenCodeCard extends HTMLElement {
       }
       .chat-input-container {
         display: flex;
+        flex-direction: column;
         gap: 8px;
         padding: 12px 16px;
         border-top: 1px solid var(--divider-color);
         background: var(--card-background-color);
-        align-items: flex-end;
       }
-      .agent-selector {
-        padding: 8px 12px;
-        border: 1px solid var(--divider-color);
-        border-radius: 8px;
-        background: var(--card-background-color);
-        color: var(--primary-text-color);
-        font-size: 0.9em;
-        cursor: pointer;
-        min-width: 120px;
-      }
-      .agent-selector.loading {
+      .agent-selector-row {
         display: flex;
         align-items: center;
-        justify-content: center;
-        padding: 8px;
-        min-width: 40px;
-        border: none;
-        background: transparent;
+        gap: 8px;
       }
-      .agent-selector.loading ha-icon {
-        --mdc-icon-size: 20px;
+      .agent-selector-label {
+        display: flex;
+        align-items: center;
+        gap: 4px;
         color: var(--secondary-text-color);
+        font-size: 0.85em;
+      }
+      .agent-selector-label ha-icon {
+        --mdc-icon-size: 16px;
+      }
+      .agent-selector-loading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--secondary-text-color);
+        font-size: 0.85em;
+      }
+      .agent-selector-loading ha-icon {
+        --mdc-icon-size: 16px;
+      }
+      .agent-selector {
+        flex: 1;
+        padding: 6px 10px;
+        border: 1px solid var(--divider-color);
+        border-radius: 6px;
+        background: var(--card-background-color);
+        color: var(--primary-text-color);
+        font-size: 0.85em;
+        cursor: pointer;
+        max-width: 100%;
+      }
+      .chat-input-row {
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
       }
       .chat-input {
         flex: 1;

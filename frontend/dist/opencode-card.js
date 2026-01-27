@@ -201,22 +201,33 @@ function W(E){return`opencode_history_${E}`}function C(E){let p=new Date(E);if(i
           </div>
           <div class="chat-input-container">
             ${this._renderAgentSelector()}
-            <textarea class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
-            <button class="chat-send-btn" title="Send message">
-              <ha-icon icon="mdi:send"></ha-icon>
-            </button>
+            <div class="chat-input-row">
+              <textarea class="chat-input" placeholder="Type a message... (Enter to send, Shift+Enter for newline)" rows="1"></textarea>
+              <button class="chat-send-btn" title="Send message">
+                <ha-icon icon="mdi:send"></ha-icon>
+              </button>
+            </div>
           </div>
         </div>
       </div>
     `}_renderAgentSelector(){if(this._agentsLoading)return`
-        <div class="agent-selector loading">
-          <ha-icon icon="mdi:loading" class="spinning"></ha-icon>
+        <div class="agent-selector-row">
+          <div class="agent-selector-loading">
+            <ha-icon icon="mdi:loading" class="spinning"></ha-icon>
+            <span>Loading agents...</span>
+          </div>
         </div>
-      `;if(this._availableAgents.length===0)return"";let e=this._availableAgents.filter(t=>t.mode==="primary"||t.mode==="all");if(e.length===0)return"";let i=e.map(t=>{let s=this._selectedAgent===t.name?"selected":"",n=t.description?` - ${t.description}`:"";return`<option value="${t.name}" ${s}>${t.name}${n}</option>`}).join("");return`
-      <select class="agent-selector" title="Select agent">
-        <option value="" ${this._selectedAgent?"":"selected"}>Default Agent</option>
-        ${i}
-      </select>
+      `;if(this._availableAgents.length===0)return"";let e=this._availableAgents.filter(t=>t.mode==="primary"||t.mode==="all");if(e.length===0)return"";let i=e.map(t=>{let s=this._selectedAgent===t.name?"selected":"";return`<option value="${t.name}" ${s}>${t.name}</option>`}).join("");return`
+      <div class="agent-selector-row">
+        <label class="agent-selector-label">
+          <ha-icon icon="mdi:robot"></ha-icon>
+          <span>Agent:</span>
+        </label>
+        <select class="agent-selector" title="Select agent">
+          <option value="" ${this._selectedAgent?"":"selected"}>Default</option>
+          ${i}
+        </select>
+      </div>
     `}_renderHistoryLoading(){return`
       <div class="history-loading">
         <ha-icon icon="mdi:loading" class="spinning"></ha-icon>
@@ -1672,34 +1683,52 @@ function W(E){return`opencode_history_${E}`}function C(E){let p=new Date(E);if(i
       }
       .chat-input-container {
         display: flex;
+        flex-direction: column;
         gap: 8px;
         padding: 12px 16px;
         border-top: 1px solid var(--divider-color);
         background: var(--card-background-color);
-        align-items: flex-end;
       }
-      .agent-selector {
-        padding: 8px 12px;
-        border: 1px solid var(--divider-color);
-        border-radius: 8px;
-        background: var(--card-background-color);
-        color: var(--primary-text-color);
-        font-size: 0.9em;
-        cursor: pointer;
-        min-width: 120px;
-      }
-      .agent-selector.loading {
+      .agent-selector-row {
         display: flex;
         align-items: center;
-        justify-content: center;
-        padding: 8px;
-        min-width: 40px;
-        border: none;
-        background: transparent;
+        gap: 8px;
       }
-      .agent-selector.loading ha-icon {
-        --mdc-icon-size: 20px;
+      .agent-selector-label {
+        display: flex;
+        align-items: center;
+        gap: 4px;
         color: var(--secondary-text-color);
+        font-size: 0.85em;
+      }
+      .agent-selector-label ha-icon {
+        --mdc-icon-size: 16px;
+      }
+      .agent-selector-loading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--secondary-text-color);
+        font-size: 0.85em;
+      }
+      .agent-selector-loading ha-icon {
+        --mdc-icon-size: 16px;
+      }
+      .agent-selector {
+        flex: 1;
+        padding: 6px 10px;
+        border: 1px solid var(--divider-color);
+        border-radius: 6px;
+        background: var(--card-background-color);
+        color: var(--primary-text-color);
+        font-size: 0.85em;
+        cursor: pointer;
+        max-width: 100%;
+      }
+      .chat-input-row {
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
       }
       .chat-input {
         flex: 1;
